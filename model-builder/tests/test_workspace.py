@@ -1,5 +1,6 @@
 import hashlib
 import sqlite3
+import xml.etree.ElementTree as ET
 import uuid
 from pathlib import Path
 
@@ -25,6 +26,13 @@ INKSCAPE_SVG = b"""\
   <g inkscape:label="Layer 1" inkscape:groupmode="layer" transform="translate(10 20)">
     <path d="M 1 2 L 5 6" style="fill:none;stroke:#000;stroke-width:2" />
   </g>
+</svg>
+"""
+
+LONG_TRACED_STROKE_SVG = b"""\
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 40">
+  <path id="trace" style="fill:none;stroke:#000;stroke-width:1"
+    d="M 0 20 C 20 0 40 40 60 20 C 80 0 100 40 120 20 C 140 0 160 40 180 20 C 195 10 205 30 220 20" />
 </svg>
 """
 
@@ -112,6 +120,34 @@ def test_svg_upload_strips_inkscape_page_metadata(tmp_path: Path) -> None:
     assert "height=" not in artifact_text
     assert 'viewBox="10 21 6 6"' in artifact_text
     assert source["sha256"] == hashlib.sha256(artifact_text.encode("utf-8")).hexdigest()
+
+
+def test_svg_upload_splits_long_traced_strokes_before_storing_source(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    client = TestClient(create_app(workspace))
+
+    response = client.post(
+        "/sources",
+        files={"file": ("trace.svg", LONG_TRACED_STROKE_SVG, "image/svg+xml")},
+    )
+
+    assert response.status_code == 201
+    source = response.json()["source"]
+    artifact_path = workspace / source["artifactPath"]
+    artifact_bytes = artifact_path.read_bytes()
+    root = ET.fromstring(artifact_bytes)
+    substrokes = [
+        element
+        for element in root.iter()
+        if element.get("data-sketcher-substroke") is not None
+    ]
+
+    assert len(substrokes) > 1
+    assert all(element.get("d", "").startswith("M ") for element in substrokes)
+    assert source["byteSize"] == len(artifact_bytes)
+    assert source["sha256"] == hashlib.sha256(artifact_bytes).hexdigest()
 
 
 def test_invalid_content_type_creates_no_records_or_artifacts(tmp_path: Path) -> None:

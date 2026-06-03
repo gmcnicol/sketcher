@@ -99,6 +99,13 @@ def style_value(element: ET.Element, key: str, default: str | None = None) -> st
     return style_to_dict(element.get("style")).get(key, default)
 
 
+def is_stroke_like_path(element: ET.Element) -> bool:
+    return (
+        style_value(element, "fill", "none") == "none"
+        and style_value(element, "stroke", "none") != "none"
+    )
+
+
 def dict_to_style(values: dict[str, str]) -> str:
     return ";".join(f"{key}:{value}" for key, value in values.items())
 
@@ -757,6 +764,66 @@ def smooth_path_from_points(
     return " ".join(parts)
 
 
+def route_axis(route: list[tuple[float, float]]) -> str:
+    if not route:
+        return "horizontal"
+    xs = [point[0] for point in route]
+    ys = [point[1] for point in route]
+    return "vertical" if max(ys) - min(ys) > max(xs) - min(xs) else "horizontal"
+
+
+def route_endpoint_distance(
+    left: tuple[float, float],
+    right: tuple[float, float],
+) -> float:
+    return math.hypot(right[0] - left[0], right[1] - left[1])
+
+
+def order_routes_by_nearest_endpoint(
+    routes: list[list[tuple[float, float]]],
+    *,
+    distance_weight: float = 1.0,
+) -> list[list[tuple[float, float]]]:
+    remaining = [route for route in routes if route]
+    if distance_weight <= 0 or len(remaining) <= 1:
+        return remaining
+
+    normalized_distance_weight = min(distance_weight, 1.0)
+    source_order_weight = 1 - normalized_distance_weight
+    ordered = [remaining.pop(0)]
+    current = ordered[-1][-1]
+    while remaining:
+        best_index = 0
+        best_reverse = False
+        best_score = math.inf
+        for index, route in enumerate(remaining):
+            source_order_penalty = index * 100 * source_order_weight
+            forward_score = (
+                route_endpoint_distance(current, route[0]) * normalized_distance_weight
+                + source_order_penalty
+            )
+            reverse_score = (
+                route_endpoint_distance(current, route[-1]) * normalized_distance_weight
+                + source_order_penalty
+            )
+            if forward_score < best_score:
+                best_index = index
+                best_reverse = False
+                best_score = forward_score
+            if reverse_score < best_score:
+                best_index = index
+                best_reverse = True
+                best_score = reverse_score
+
+        route = remaining.pop(best_index)
+        if best_reverse:
+            route = list(reversed(route))
+        ordered.append(route)
+        current = route[-1]
+
+    return ordered
+
+
 def stroke_route_from_path_d(d: str) -> list[tuple[float, float]]:
     return sample_path_outline(re.sub(r"[Zz]", "", d), curve_steps=12)
 
@@ -1165,6 +1232,7 @@ def sketch_paths(
     mode: str,
     roughness: float,
     keep_original: bool,
+    stroke_order_distance_weight: float,
     rng: random.Random,
 ) -> int:
     defs = get_or_create_defs(root)
@@ -1172,12 +1240,7 @@ def sketch_paths(
     paths = [element for element in root.iter(f"{{{SVG_NS}}}path") if element.get("d")]
     selected_mode = mode
     if mode == "auto":
-        stroke_like = [
-            path
-            for path in paths
-            if style_value(path, "fill", "none") == "none"
-            and style_value(path, "stroke", "none") != "none"
-        ]
+        stroke_like = [path for path in paths if is_stroke_like_path(path)]
         selected_mode = "stroke" if paths and len(stroke_like) == len(paths) else "fill"
 
     for path_index, path in enumerate(paths, start=1):
@@ -1191,8 +1254,13 @@ def sketch_paths(
         group = ET.Element(f"{{{SVG_NS}}}g")
         group.set("id", f"sketch-retrace-{path_index}")
         group.set("data-sketcher-source", path.get("id", f"path-{path_index}"))
+        path_mode = (
+            "stroke"
+            if selected_mode in {"fill", "outline"} and is_stroke_like_path(path)
+            else selected_mode
+        )
 
-        if selected_mode == "fill":
+        if path_mode == "fill":
             clip_id = f"sketch-clip-{path_index}"
             clip_path = ET.Element(f"{{{SVG_NS}}}clipPath")
             clip_path.set("id", clip_id)
@@ -1217,9 +1285,12 @@ def sketch_paths(
         for repeat_index in range(repeats):
             copy = deepcopy(path)
             copy.set("id", f"{path.get('id', 'path')}-sketch-{repeat_index + 1}")
-            if selected_mode == "stroke":
+            if path_mode == "stroke":
                 try:
-                    sampled_routes = stroke_routes_from_path_d(path.get("d", ""))
+                    sampled_routes = order_routes_by_nearest_endpoint(
+                        stroke_routes_from_path_d(path.get("d", "")),
+                        distance_weight=stroke_order_distance_weight,
+                    )
                 except ValueError as error:
                     raise SystemExit(
                         f"{path.get('id', 'path')} is a closed outline, not an open stroke route. "
@@ -1271,6 +1342,7 @@ def render_sketch_svg(
     mode: str = "auto",
     seed: int = 7,
     keep_original: bool = False,
+    stroke_order_distance_weight: float = 1.0,
 ) -> int:
     if repeats < 1:
         raise ValueError("repeats must be at least 1")
@@ -1290,6 +1362,8 @@ def render_sketch_svg(
         raise ValueError("shade_opacity must be greater than 0 and no more than 1")
     if mode not in {"auto", "fill", "stroke", "outline"}:
         raise ValueError("mode must be one of auto, fill, stroke, or outline")
+    if stroke_order_distance_weight < 0:
+        raise ValueError("stroke_order_distance_weight must be 0 or greater")
 
     register_namespaces()
     tree = ET.parse(input_path)
@@ -1309,6 +1383,7 @@ def render_sketch_svg(
         mode=mode,
         roughness=roughness,
         keep_original=keep_original,
+        stroke_order_distance_weight=stroke_order_distance_weight,
         rng=random.Random(seed),
     )
 
@@ -1344,6 +1419,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--seed", type=int, default=7, help="Random seed for repeatable output")
     parser.add_argument(
+        "--stroke-order-distance-weight",
+        type=float,
+        default=1.0,
+        help="Weight for nearest-endpoint ordering of scanned stroke subpaths; 0 preserves source order",
+    )
+    parser.add_argument(
         "--keep-original",
         action="store_true",
         help="Keep original paths visible underneath the sketched retraces",
@@ -1369,6 +1450,7 @@ def main() -> None:
             mode=args.mode,
             seed=args.seed,
             keep_original=args.keep_original,
+            stroke_order_distance_weight=args.stroke_order_distance_weight,
         )
     except (ET.ParseError, ValueError) as error:
         raise SystemExit(str(error)) from error

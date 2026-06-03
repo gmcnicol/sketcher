@@ -561,6 +561,7 @@ def build_first_generation_genome(run_id: str, attempt: int) -> dict[str, Any]:
             "seed": seed,
             "keep_original": False,
             "stroke": "#111111",
+            "stroke_order_distance_weight": 1.0,
             "repeats": clamp_int(
                 render_parameters["repeats"] + rng.randint(-4, 5),
                 REPEATS_MIN,
@@ -782,6 +783,13 @@ def mutate_render_parameters(
             variance=0.14,
         ),
         "stroke": parent_parameters.get("stroke", "#111111"),
+        "stroke_order_distance_weight": mutate_float_parameter(
+            parent_parameters.get("stroke_order_distance_weight", 1.0),
+            rng,
+            minimum=0.0,
+            maximum=2.0,
+            variance=0.35,
+        ),
         "keep_original": bool(parent_parameters.get("keep_original", False)),
     }
     return humanize_dense_strokes(render_parameters)

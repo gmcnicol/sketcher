@@ -3,7 +3,12 @@ import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from sketcher_model_builder.generator import render_sketch_svg, stroke_routes_from_path_d
+from sketcher_model_builder.generator import (
+    order_routes_by_nearest_endpoint,
+    render_sketch_svg,
+    route_axis,
+    stroke_routes_from_path_d,
+)
 
 
 def test_generator_writes_svg(tmp_path: Path) -> None:
@@ -76,3 +81,68 @@ def test_stroke_mode_keeps_scanned_subpaths_separate(tmp_path: Path) -> None:
     rendered_d = sketch_paths[0].get("d", "")
     assert rendered_d.count("M") == 2
     assert "100 100" in rendered_d
+
+
+def test_fill_mode_preserves_scanned_stroke_subpaths(tmp_path: Path) -> None:
+    input_svg = tmp_path / "source.svg"
+    output_svg = tmp_path / "out.svg"
+    input_svg.write_text(
+        """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120">
+  <path id="scan" d="M 0 0 L 10 0 M 100 100 L 110 100" style="fill:none;stroke:#000;stroke-width:1" />
+</svg>
+""",
+        encoding="utf-8",
+    )
+
+    render_sketch_svg(
+        input_svg,
+        output_svg,
+        mode="fill",
+        repeats=1,
+        shade_strokes=8,
+        jitter=0,
+        roughness=0,
+        seed=1,
+    )
+
+    root = ET.parse(output_svg).getroot()
+    sketch_paths = [
+        element
+        for element in root.iter()
+        if element.get("data-sketcher-pass") == "1"
+    ]
+    fill_paths = [
+        element
+        for element in root.iter()
+        if element.get("data-sketcher-flow-pass")
+        or element.get("data-sketcher-pressure-pass")
+        or element.get("data-sketcher-vertical-flow-pass")
+    ]
+
+    assert len(sketch_paths) == 1
+    assert sketch_paths[0].get("d", "").count("M") == 2
+    assert fill_paths == []
+
+
+def test_stroke_routes_can_be_ordered_by_nearest_endpoint() -> None:
+    first = [(0.0, 0.0), (10.0, 0.0)]
+    far = [(100.0, 100.0), (110.0, 100.0)]
+    near_reversed = [(22.0, 0.0), (12.0, 0.0)]
+
+    ordered = order_routes_by_nearest_endpoint(
+        [first, far, near_reversed],
+        distance_weight=1.0,
+    )
+
+    assert ordered == [first, list(reversed(near_reversed)), far]
+
+    source_ordered = order_routes_by_nearest_endpoint(
+        [first, far, near_reversed],
+        distance_weight=0.0,
+    )
+    assert source_ordered == [first, far, near_reversed]
+
+
+def test_stroke_route_axis_uses_larger_span() -> None:
+    assert route_axis([(0.0, 0.0), (0.0, 20.0), (4.0, 22.0)]) == "vertical"
+    assert route_axis([(0.0, 0.0), (20.0, 0.0), (22.0, 4.0)]) == "horizontal"

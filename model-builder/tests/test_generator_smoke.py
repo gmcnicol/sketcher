@@ -28,4 +28,11 @@ def test_generator_writes_svg(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
     assert output_svg.exists()
-    assert "<svg" in output_svg.read_text()
+    output = output_svg.read_text()
+    assert "<svg" in output
+    assert "inkscape" not in output
+    assert "sodipodi" not in output
+    assert "<metadata" not in output
+    assert "width=" not in output
+    assert "height=" not in output
+    assert "viewBox=" in output

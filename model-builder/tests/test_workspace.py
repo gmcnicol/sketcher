@@ -10,6 +10,23 @@ from sketcher_model_builder.workspace import ensure_workspace
 
 
 VALID_SVG = b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"></svg>'
+INKSCAPE_SVG = b"""\
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+  xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+  width="100mm"
+  height="100mm"
+  viewBox="0 0 100 100"
+  inkscape:version="1.4"
+  sodipodi:docname="source.svg">
+  <metadata>editor metadata</metadata>
+  <sodipodi:namedview inkscape:pageopacity="0" />
+  <g inkscape:label="Layer 1" inkscape:groupmode="layer" transform="translate(10 20)">
+    <path d="M 1 2 L 5 6" style="fill:none;stroke:#000;stroke-width:2" />
+  </g>
+</svg>
+"""
 
 
 def row_count(workspace: Path, table: str) -> int:
@@ -55,13 +72,13 @@ def test_valid_svg_upload_creates_source_run_and_artifact(tmp_path: Path) -> Non
         "status": "active",
     }
     assert source["filename"] == "example.svg"
-    assert source["byteSize"] == len(VALID_SVG)
-    assert source["sha256"] == hashlib.sha256(VALID_SVG).hexdigest()
     assert source["artifactPath"].startswith("artifacts/sources/")
     assert not Path(source["artifactPath"]).is_absolute()
 
     artifact = workspace / source["artifactPath"]
-    assert artifact.read_bytes() == VALID_SVG
+    artifact_bytes = artifact.read_bytes()
+    assert source["byteSize"] == len(artifact_bytes)
+    assert source["sha256"] == hashlib.sha256(artifact_bytes).hexdigest()
 
     with sqlite3.connect(workspace / "sketcher.sqlite3") as db:
         db.row_factory = sqlite3.Row
@@ -73,6 +90,28 @@ def test_valid_svg_upload_creates_source_run_and_artifact(tmp_path: Path) -> Non
     assert source_row["artifact_path"] == source["artifactPath"]
     assert run_row["source_id"] == source["id"]
     assert run_row["status"] == "active"
+
+
+def test_svg_upload_strips_inkscape_page_metadata(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    client = TestClient(create_app(workspace))
+
+    response = client.post(
+        "/sources",
+        files={"file": ("example.svg", INKSCAPE_SVG, "image/svg+xml")},
+    )
+
+    assert response.status_code == 201
+    source = response.json()["source"]
+    artifact_text = (workspace / source["artifactPath"]).read_text(encoding="utf-8")
+
+    assert "inkscape" not in artifact_text
+    assert "sodipodi" not in artifact_text
+    assert "metadata" not in artifact_text
+    assert "width=" not in artifact_text
+    assert "height=" not in artifact_text
+    assert 'viewBox="10 21 6 6"' in artifact_text
+    assert source["sha256"] == hashlib.sha256(artifact_text.encode("utf-8")).hexdigest()
 
 
 def test_invalid_content_type_creates_no_records_or_artifacts(tmp_path: Path) -> None:

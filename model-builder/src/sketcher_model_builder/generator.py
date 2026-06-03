@@ -16,15 +16,18 @@ SVG_NS = "http://www.w3.org/2000/svg"
 INKSCAPE_NS = "http://www.inkscape.org/namespaces/inkscape"
 SODIPODI_NS = "http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
 XLINK_NS = "http://www.w3.org/1999/xlink"
+EDITOR_METADATA_NAMESPACES = {INKSCAPE_NS, SODIPODI_NS}
+EXPORT_BOUNDING_TAGS = {"path", "rect", "circle", "ellipse", "line", "polyline", "polygon"}
+NON_RENDERED_CONTAINER_TAGS = {"clipPath", "defs", "mask", "metadata", "pattern", "symbol"}
 
 PATH_TOKEN_RE = re.compile(
     r"[AaCcHhLlMmQqSsTtVvZz]|[-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?"
 )
+TRANSFORM_RE = re.compile(r"([A-Za-z]+)\(([^)]*)\)")
 
 
 def register_namespaces() -> None:
     ET.register_namespace("", SVG_NS)
-    ET.register_namespace("svg", SVG_NS)
     ET.register_namespace("inkscape", INKSCAPE_NS)
     ET.register_namespace("sodipodi", SODIPODI_NS)
     ET.register_namespace("xlink", XLINK_NS)
@@ -115,6 +118,16 @@ def local_name(element: ET.Element) -> str:
     return element.tag.rsplit("}", 1)[-1]
 
 
+def namespace_name(name: str) -> str | None:
+    if name.startswith("{"):
+        return name[1:].split("}", 1)[0]
+    return None
+
+
+def element_namespace(element: ET.Element) -> str | None:
+    return namespace_name(element.tag)
+
+
 def points_attr_to_pairs(points: str) -> list[tuple[float, float]]:
     numbers = [float(value) for value in re.findall(r"[-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?", points)]
     return [(numbers[index], numbers[index + 1]) for index in range(0, len(numbers) - 1, 2)]
@@ -183,21 +196,224 @@ def normalize_basic_shapes(root: ET.Element) -> None:
         hide_element(element)
 
 
-def make_inkscape_page_unobtrusive(root: ET.Element) -> None:
-    namedviews = list(root.iter(f"{{{SODIPODI_NS}}}namedview"))
-    if not namedviews:
-        namedview = ET.Element(f"{{{SODIPODI_NS}}}namedview")
-        namedview.set("id", "namedview-sketcher")
-        root.insert(0, namedview)
-        namedviews = [namedview]
+Matrix = tuple[float, float, float, float, float, float]
 
-    for namedview in namedviews:
-        namedview.set("pagecolor", "#ffffff")
-        namedview.set("showborder", "false")
-        namedview.set("borderopacity", "0")
-        namedview.set(f"{{{INKSCAPE_NS}}}showpageshadow", "0")
-        namedview.set(f"{{{INKSCAPE_NS}}}pageopacity", "0")
-        namedview.set(f"{{{INKSCAPE_NS}}}pagecheckerboard", "true")
+
+def matrix_multiply(left: Matrix, right: Matrix) -> Matrix:
+    la, lb, lc, ld, le, lf = left
+    ra, rb, rc, rd, re, rf = right
+    return (
+        la * ra + lc * rb,
+        lb * ra + ld * rb,
+        la * rc + lc * rd,
+        lb * rc + ld * rd,
+        la * re + lc * rf + le,
+        lb * re + ld * rf + lf,
+    )
+
+
+def apply_matrix(matrix: Matrix, x: float, y: float) -> tuple[float, float]:
+    a, b, c, d, e, f = matrix
+    return a * x + c * y + e, b * x + d * y + f
+
+
+def parse_transform_numbers(value: str) -> list[float]:
+    return [
+        float(number)
+        for number in re.findall(
+            r"[-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?",
+            value,
+        )
+    ]
+
+
+def transform_to_matrix(transform: str | None) -> Matrix:
+    matrix: Matrix = (1, 0, 0, 1, 0, 0)
+    if not transform:
+        return matrix
+
+    for function, raw_values in TRANSFORM_RE.findall(transform):
+        values = parse_transform_numbers(raw_values)
+        name = function.lower()
+        next_matrix: Matrix | None = None
+
+        if name == "matrix" and len(values) >= 6:
+            next_matrix = (
+                values[0],
+                values[1],
+                values[2],
+                values[3],
+                values[4],
+                values[5],
+            )
+        elif name == "translate" and values:
+            next_matrix = (1, 0, 0, 1, values[0], values[1] if len(values) > 1 else 0)
+        elif name == "scale" and values:
+            sx = values[0]
+            sy = values[1] if len(values) > 1 else sx
+            next_matrix = (sx, 0, 0, sy, 0, 0)
+        elif name == "rotate" and values:
+            angle = math.radians(values[0])
+            cos_value = math.cos(angle)
+            sin_value = math.sin(angle)
+            rotation: Matrix = (cos_value, sin_value, -sin_value, cos_value, 0, 0)
+            if len(values) >= 3:
+                cx, cy = values[1], values[2]
+                next_matrix = matrix_multiply(
+                    matrix_multiply((1, 0, 0, 1, cx, cy), rotation),
+                    (1, 0, 0, 1, -cx, -cy),
+                )
+            else:
+                next_matrix = rotation
+
+        if next_matrix is not None:
+            matrix = matrix_multiply(matrix, next_matrix)
+
+    return matrix
+
+
+def transformed_bounds(
+    bounds: tuple[float, float, float, float],
+    matrix: Matrix,
+) -> tuple[float, float, float, float]:
+    min_x, min_y, max_x, max_y = bounds
+    points = [
+        apply_matrix(matrix, min_x, min_y),
+        apply_matrix(matrix, min_x, max_y),
+        apply_matrix(matrix, max_x, min_y),
+        apply_matrix(matrix, max_x, max_y),
+    ]
+    return (
+        min(point[0] for point in points),
+        min(point[1] for point in points),
+        max(point[0] for point in points),
+        max(point[1] for point in points),
+    )
+
+
+def numeric_style_value(element: ET.Element, key: str, default: float = 0) -> float:
+    value = style_value(element, key)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
+def element_export_bounds(
+    element: ET.Element,
+    matrix: Matrix,
+) -> tuple[float, float, float, float] | None:
+    tag = local_name(element)
+    if tag == "path":
+        d = element.get("d")
+    elif tag in EXPORT_BOUNDING_TAGS:
+        d = basic_shape_to_path_d(element)
+    else:
+        d = None
+
+    if not d:
+        return None
+
+    min_x, min_y, max_x, max_y = transformed_bounds(absolute_path_bounds(d), matrix)
+    padding = numeric_style_value(element, "stroke-width") / 2
+    return min_x - padding, min_y - padding, max_x + padding, max_y + padding
+
+
+def combine_bounds(
+    bounds: list[tuple[float, float, float, float]],
+) -> tuple[float, float, float, float]:
+    if not bounds:
+        raise ValueError("no bounds to combine")
+    return (
+        min(item[0] for item in bounds),
+        min(item[1] for item in bounds),
+        max(item[2] for item in bounds),
+        max(item[3] for item in bounds),
+    )
+
+
+def visible_content_bounds(root: ET.Element) -> tuple[float, float, float, float] | None:
+    bounds: list[tuple[float, float, float, float]] = []
+
+    def visit(element: ET.Element, inherited_matrix: Matrix) -> None:
+        if local_name(element) in NON_RENDERED_CONTAINER_TAGS:
+            return
+        if (
+            style_value(element, "display") == "none"
+            or style_value(element, "visibility") == "hidden"
+        ):
+            return
+
+        matrix = matrix_multiply(
+            inherited_matrix,
+            transform_to_matrix(element.get("transform")),
+        )
+        element_bounds = element_export_bounds(element, matrix)
+        if element_bounds is not None:
+            bounds.append(element_bounds)
+
+        for child in element:
+            visit(child, matrix)
+
+    visit(root, (1, 0, 0, 1, 0, 0))
+    if not bounds:
+        return None
+    return combine_bounds(bounds)
+
+
+def strip_editor_metadata(root: ET.Element) -> None:
+    for key in list(root.attrib):
+        if key in {"width", "height", "x", "y"} or namespace_name(key) in EDITOR_METADATA_NAMESPACES:
+            del root.attrib[key]
+
+    for element in root.iter():
+        for key in list(element.attrib):
+            if namespace_name(key) in EDITOR_METADATA_NAMESPACES:
+                del element.attrib[key]
+
+    def prune(element: ET.Element) -> None:
+        for child in list(element):
+            if (
+                local_name(child).lower() in {"metadata", "namedview"}
+                or element_namespace(child) in EDITOR_METADATA_NAMESPACES
+            ):
+                element.remove(child)
+            else:
+                prune(child)
+
+    prune(root)
+
+
+def fit_viewbox_to_visible_content(root: ET.Element) -> None:
+    bounds = visible_content_bounds(root)
+    if bounds is None:
+        return
+
+    min_x, min_y, max_x, max_y = bounds
+    width = max_x - min_x
+    height = max_y - min_y
+    if width <= 0 or height <= 0:
+        return
+
+    root.set(
+        "viewBox",
+        " ".join(fmt_number(value) for value in (min_x, min_y, width, height)),
+    )
+
+
+def clean_svg_tree_for_export(root: ET.Element, *, fit_viewbox: bool = True) -> None:
+    strip_editor_metadata(root)
+    if fit_viewbox:
+        fit_viewbox_to_visible_content(root)
+
+
+def clean_svg_bytes_for_export(data: bytes, *, fit_viewbox: bool = True) -> bytes:
+    register_namespaces()
+    root = ET.fromstring(data)
+    clean_svg_tree_for_export(root, fit_viewbox=fit_viewbox)
+    return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 
 def get_or_create_defs(root: ET.Element) -> ET.Element:
@@ -1047,7 +1263,6 @@ def render_sketch_svg(
     tree = ET.parse(input_path)
     root = tree.getroot()
     normalize_basic_shapes(root)
-    make_inkscape_page_unobtrusive(root)
 
     path_count = sketch_paths(
         root=root,
@@ -1068,6 +1283,7 @@ def render_sketch_svg(
     if path_count == 0:
         raise ValueError(f"No path elements with d attributes found in {input_path}")
 
+    clean_svg_tree_for_export(root)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     tree.write(output_path, encoding="UTF-8", xml_declaration=True)
     return path_count

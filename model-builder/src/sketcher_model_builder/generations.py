@@ -34,6 +34,8 @@ REPEATS_MUTATION_DELTA = 3000
 SHADE_STROKES_MIN = 0
 SHADE_STROKES_MAX = 3000
 SHADE_STROKES_MUTATION_DELTA = 3000
+DENSE_REPEATS_BASELINE = 60
+DENSE_SHADE_STROKES_BASELINE = 90
 SKETCH_PATH_MARKERS = {
     "data-sketcher-pass",
     "data-sketcher-flow-pass",
@@ -721,7 +723,7 @@ def mutate_render_parameters(
     parent_parameters: dict[str, Any],
     rng: random.Random,
 ) -> dict[str, Any]:
-    return {
+    render_parameters = {
         "mode": parent_parameters.get("mode", "auto"),
         "repeats": mutate_int_parameter(
             parent_parameters.get("repeats", 24),
@@ -782,6 +784,59 @@ def mutate_render_parameters(
         "stroke": parent_parameters.get("stroke", "#111111"),
         "keep_original": bool(parent_parameters.get("keep_original", False)),
     }
+    return humanize_dense_strokes(render_parameters)
+
+
+def humanize_dense_strokes(render_parameters: dict[str, Any]) -> dict[str, Any]:
+    repeats = int(render_parameters["repeats"])
+    shade_strokes = int(render_parameters["shade_strokes"])
+
+    retrace_scale = density_scale(repeats, DENSE_REPEATS_BASELINE)
+    shade_scale = density_scale(shade_strokes, DENSE_SHADE_STROKES_BASELINE)
+
+    render_parameters = dict(render_parameters)
+    render_parameters.update(
+        {
+            "stroke_width": clamp_float(
+                float(render_parameters["stroke_width"]) * retrace_scale,
+                0.008,
+                0.52,
+            ),
+            "opacity": clamp_float(
+                float(render_parameters["opacity"]) * retrace_scale,
+                0.003,
+                0.16,
+            ),
+            "shade_width": clamp_float(
+                float(render_parameters["shade_width"]) * shade_scale,
+                0.05,
+                2.4,
+            ),
+            "shade_opacity": clamp_float(
+                float(render_parameters["shade_opacity"]) * shade_scale,
+                0.004,
+                0.32,
+            ),
+            "jitter": clamp_float(
+                float(render_parameters["jitter"]) * (1 + (1 - retrace_scale) * 0.35),
+                0.02,
+                0.3,
+            ),
+            "roughness": clamp_float(
+                float(render_parameters["roughness"])
+                * (1 + (1 - min(retrace_scale, shade_scale)) * 0.3),
+                0.04,
+                1.15,
+            ),
+        }
+    )
+    return render_parameters
+
+
+def density_scale(count: int, baseline: int) -> float:
+    if count <= baseline:
+        return 1.0
+    return math.sqrt(baseline / count)
 
 
 def mutate_int_parameter(

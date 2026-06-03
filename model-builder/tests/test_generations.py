@@ -247,6 +247,39 @@ def test_survivor_stroke_count_mutations_can_reach_thousands() -> None:
     assert shade_mutation["shade_strokes"] <= generations.SHADE_STROKES_MAX
 
 
+def test_dense_survivor_strokes_are_thin_light_and_more_human() -> None:
+    parent_parameters = {
+        "repeats": 28,
+        "shade_strokes": 58,
+        "stroke_width": 0.22,
+        "opacity": 0.075,
+        "shade_width": 1.1,
+        "shade_opacity": 0.14,
+        "jitter": 0.08,
+        "roughness": 0.45,
+    }
+
+    repeat_mutation = generations.mutate_render_parameters(
+        parent_parameters,
+        random.Random(5),
+    )
+    shade_mutation = generations.mutate_render_parameters(
+        parent_parameters,
+        random.Random(1),
+    )
+
+    assert repeat_mutation["repeats"] > 1000
+    assert repeat_mutation["stroke_width"] < 0.06
+    assert repeat_mutation["opacity"] < 0.02
+    assert repeat_mutation["jitter"] > parent_parameters["jitter"]
+    assert repeat_mutation["roughness"] > parent_parameters["roughness"]
+
+    assert shade_mutation["shade_strokes"] > 1000
+    assert shade_mutation["shade_width"] < 0.3
+    assert shade_mutation["shade_opacity"] < 0.04
+    assert shade_mutation["roughness"] > parent_parameters["roughness"]
+
+
 def test_next_generation_requires_completed_review(tmp_path: Path, monkeypatch) -> None:
     install_fast_renderer(monkeypatch)
     workspace = tmp_path / "workspace"

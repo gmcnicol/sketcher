@@ -122,6 +122,7 @@ def test_generation_endpoint_creates_first_generation_with_24_ready_candidates(
         assert genome["strategyFamily"]
         assert isinstance(genome["seed"], int)
         assert genome["renderParameters"]["seed"] == genome["seed"]
+        assert genome["renderParameters"]["repeats"] >= generations.REPEATS_MIN
 
 
 def test_duplicate_generation_creation_returns_conflict_without_extra_candidates(

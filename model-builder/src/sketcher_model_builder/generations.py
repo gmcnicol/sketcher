@@ -28,7 +28,7 @@ MAX_FIRST_GENERATION_ATTEMPTS = 72
 NEXT_GENERATION_SIZE = 24
 MAX_NEXT_GENERATION_ATTEMPTS = 96
 MAX_SURVIVOR_CARRYOVERS = 8
-REPEATS_MIN = 2
+REPEATS_MIN = 100
 REPEATS_MAX = 3000
 REPEATS_MUTATION_DELTA = 3000
 SHADE_STROKES_MIN = 0
@@ -604,6 +604,7 @@ def build_first_generation_genome(run_id: str, attempt: int) -> dict[str, Any]:
             ),
         }
     )
+    render_parameters = humanize_dense_strokes(render_parameters)
 
     return {
         "schemaVersion": 1,

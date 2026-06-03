@@ -1,5 +1,6 @@
 import hashlib
 import json
+import random
 import sqlite3
 import uuid
 from pathlib import Path
@@ -226,6 +227,24 @@ def test_failed_render_attempts_are_persisted_and_excluded_from_ready_counts(
     assert len(failed) == 2
     assert len(ready) == 24
     assert {row["validation_message"] for row in failed} == {"forced render failure"}
+
+
+def test_survivor_stroke_count_mutations_can_reach_thousands() -> None:
+    parent_parameters = {"repeats": 28, "shade_strokes": 58}
+
+    repeat_mutation = generations.mutate_render_parameters(
+        parent_parameters,
+        random.Random(5),
+    )
+    shade_mutation = generations.mutate_render_parameters(
+        parent_parameters,
+        random.Random(1),
+    )
+
+    assert repeat_mutation["repeats"] > 1000
+    assert repeat_mutation["repeats"] <= generations.REPEATS_MAX
+    assert shade_mutation["shade_strokes"] > 1000
+    assert shade_mutation["shade_strokes"] <= generations.SHADE_STROKES_MAX
 
 
 def test_next_generation_requires_completed_review(tmp_path: Path, monkeypatch) -> None:

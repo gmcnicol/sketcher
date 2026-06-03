@@ -28,6 +28,12 @@ MAX_FIRST_GENERATION_ATTEMPTS = 72
 NEXT_GENERATION_SIZE = 24
 MAX_NEXT_GENERATION_ATTEMPTS = 96
 MAX_SURVIVOR_CARRYOVERS = 8
+REPEATS_MIN = 2
+REPEATS_MAX = 3000
+REPEATS_MUTATION_DELTA = 3000
+SHADE_STROKES_MIN = 0
+SHADE_STROKES_MAX = 3000
+SHADE_STROKES_MUTATION_DELTA = 3000
 SKETCH_PATH_MARKERS = {
     "data-sketcher-pass",
     "data-sketcher-flow-pass",
@@ -555,13 +561,13 @@ def build_first_generation_genome(run_id: str, attempt: int) -> dict[str, Any]:
             "stroke": "#111111",
             "repeats": clamp_int(
                 render_parameters["repeats"] + rng.randint(-4, 5),
-                2,
-                44,
+                REPEATS_MIN,
+                REPEATS_MAX,
             ),
             "shade_strokes": clamp_int(
                 render_parameters["shade_strokes"] + rng.randint(-10, 14),
-                0,
-                90,
+                SHADE_STROKES_MIN,
+                SHADE_STROKES_MAX,
             ),
             "jitter": clamp_float(
                 render_parameters["jitter"] * rng.uniform(0.65, 1.65),
@@ -720,16 +726,16 @@ def mutate_render_parameters(
         "repeats": mutate_int_parameter(
             parent_parameters.get("repeats", 24),
             rng,
-            minimum=2,
-            maximum=44,
-            delta=4,
+            minimum=REPEATS_MIN,
+            maximum=REPEATS_MAX,
+            delta=REPEATS_MUTATION_DELTA,
         ),
         "shade_strokes": mutate_int_parameter(
             parent_parameters.get("shade_strokes", 24),
             rng,
-            minimum=0,
-            maximum=90,
-            delta=8,
+            minimum=SHADE_STROKES_MIN,
+            maximum=SHADE_STROKES_MAX,
+            delta=SHADE_STROKES_MUTATION_DELTA,
         ),
         "jitter": mutate_float_parameter(
             parent_parameters.get("jitter", 0.08),

@@ -433,6 +433,7 @@ def flow_path_from_centreline(
     offset: float,
     rng: random.Random,
     wobble: float,
+    roughness: float,
 ) -> str:
     shifted: list[tuple[float, float]] = []
     for index, (x, y) in enumerate(centreline):
@@ -813,6 +814,7 @@ def add_shading_strokes(
     stroke: str,
     stroke_width: float,
     opacity: float,
+    roughness: float,
     rng: random.Random,
 ) -> None:
     min_x, min_y, max_x, max_y = bounds
@@ -835,6 +837,7 @@ def add_shading_strokes(
             offset=offset,
             rng=rng,
             wobble=max(width, height) * rng.uniform(0.004, 0.012),
+            roughness=roughness,
         )
         pressure = rng.lognormvariate(0, 0.24)
 
@@ -965,6 +968,7 @@ def sketch_paths(
                 stroke=stroke,
                 stroke_width=shade_width,
                 opacity=shade_opacity,
+                roughness=roughness,
                 rng=rng,
             )
 
@@ -1003,6 +1007,72 @@ def sketch_paths(
     return len(paths)
 
 
+def render_sketch_svg(
+    input_path: Path,
+    output_path: Path,
+    *,
+    repeats: int = 54,
+    jitter: float = 0.08,
+    roughness: float = 0.65,
+    stroke_width: float = 0.24,
+    stroke: str = "#111111",
+    opacity: float = 0.075,
+    shade_strokes: int = 70,
+    shade_width: float = 1.25,
+    shade_opacity: float = 0.15,
+    mode: str = "auto",
+    seed: int = 7,
+    keep_original: bool = False,
+) -> int:
+    if repeats < 1:
+        raise ValueError("repeats must be at least 1")
+    if jitter < 0:
+        raise ValueError("jitter must be 0 or greater")
+    if roughness < 0:
+        raise ValueError("roughness must be 0 or greater")
+    if shade_strokes < 0:
+        raise ValueError("shade_strokes must be 0 or greater")
+    if stroke_width <= 0:
+        raise ValueError("stroke_width must be greater than 0")
+    if shade_width <= 0:
+        raise ValueError("shade_width must be greater than 0")
+    if not 0 < opacity <= 1:
+        raise ValueError("opacity must be greater than 0 and no more than 1")
+    if not 0 < shade_opacity <= 1:
+        raise ValueError("shade_opacity must be greater than 0 and no more than 1")
+    if mode not in {"auto", "fill", "stroke", "outline"}:
+        raise ValueError("mode must be one of auto, fill, stroke, or outline")
+
+    register_namespaces()
+    tree = ET.parse(input_path)
+    root = tree.getroot()
+    normalize_basic_shapes(root)
+    make_inkscape_page_unobtrusive(root)
+
+    path_count = sketch_paths(
+        root=root,
+        repeats=repeats,
+        jitter=jitter,
+        stroke_width=stroke_width,
+        stroke=stroke,
+        opacity=opacity,
+        shade_strokes=shade_strokes,
+        shade_width=shade_width,
+        shade_opacity=shade_opacity,
+        mode=mode,
+        roughness=roughness,
+        keep_original=keep_original,
+        rng=random.Random(seed),
+    )
+
+    if path_count == 0:
+        raise ValueError(f"No path elements with d attributes found in {input_path}")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    tree.write(output_path, encoding="UTF-8", xml_declaration=True)
+    return path_count
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Retrace SVG paths many times with small variations for a sketched look."
@@ -1035,49 +1105,26 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    if args.repeats < 1:
-        raise SystemExit("--repeats must be at least 1")
-    if args.jitter < 0:
-        raise SystemExit("--jitter must be 0 or greater")
-    if args.roughness < 0:
-        raise SystemExit("--roughness must be 0 or greater")
-    if args.shade_strokes < 0:
-        raise SystemExit("--shade-strokes must be 0 or greater")
-    if args.stroke_width <= 0:
-        raise SystemExit("--stroke-width must be greater than 0")
-    if args.shade_width <= 0:
-        raise SystemExit("--shade-width must be greater than 0")
-    if not 0 < args.opacity <= 1:
-        raise SystemExit("--opacity must be greater than 0 and no more than 1")
-    if not 0 < args.shade_opacity <= 1:
-        raise SystemExit("--shade-opacity must be greater than 0 and no more than 1")
+    try:
+        path_count = render_sketch_svg(
+            args.input,
+            args.output,
+            repeats=args.repeats,
+            jitter=args.jitter,
+            roughness=args.roughness,
+            stroke_width=args.stroke_width,
+            stroke=args.stroke,
+            opacity=args.opacity,
+            shade_strokes=args.shade_strokes,
+            shade_width=args.shade_width,
+            shade_opacity=args.shade_opacity,
+            mode=args.mode,
+            seed=args.seed,
+            keep_original=args.keep_original,
+        )
+    except (ET.ParseError, ValueError) as error:
+        raise SystemExit(str(error)) from error
 
-    register_namespaces()
-    tree = ET.parse(args.input)
-    root = tree.getroot()
-    normalize_basic_shapes(root)
-    make_inkscape_page_unobtrusive(root)
-
-    path_count = sketch_paths(
-        root=root,
-        repeats=args.repeats,
-        jitter=args.jitter,
-        stroke_width=args.stroke_width,
-        stroke=args.stroke,
-        opacity=args.opacity,
-        shade_strokes=args.shade_strokes,
-        shade_width=args.shade_width,
-        shade_opacity=args.shade_opacity,
-        mode=args.mode,
-        roughness=args.roughness,
-        keep_original=args.keep_original,
-        rng=random.Random(args.seed),
-    )
-
-    if path_count == 0:
-        raise SystemExit(f"No path elements with d attributes found in {args.input}")
-
-    tree.write(args.output, encoding="UTF-8", xml_declaration=True)
     print(f"Wrote {args.output} from {path_count} path(s)")
 
 

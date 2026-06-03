@@ -8,6 +8,15 @@ from pathlib import Path
 from fastapi import FastAPI, File, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 
+from .generations import (
+    DuplicateGenerationError,
+    MissingGenerationError,
+    SourceArtifactError,
+    UnknownRunError,
+    create_first_generation,
+    generation_summary_to_api,
+    get_current_generation,
+)
 from .workspace import (
     UploadValidationError,
     default_workspace_path,
@@ -76,5 +85,39 @@ def create_app(workspace: Path | None = None) -> FastAPI:
                 "status": result.run.status,
             },
         }
+
+    @app.post("/runs/{run_id}/generations", status_code=status.HTTP_201_CREATED)
+    def create_run_generation(run_id: str) -> dict[str, object]:
+        try:
+            summary = create_first_generation(app.state.workspace, run_id)
+        except UnknownRunError as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=str(error),
+            ) from error
+        except DuplicateGenerationError as error:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(error),
+            ) from error
+        except SourceArtifactError as error:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(error),
+            ) from error
+
+        return {"generation": generation_summary_to_api(summary)}
+
+    @app.get("/runs/{run_id}/generations/current")
+    def get_run_generation(run_id: str) -> dict[str, object]:
+        try:
+            summary = get_current_generation(app.state.workspace, run_id)
+        except (UnknownRunError, MissingGenerationError) as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=str(error),
+            ) from error
+
+        return {"generation": generation_summary_to_api(summary)}
 
     return app

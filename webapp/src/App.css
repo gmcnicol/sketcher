@@ -126,7 +126,8 @@ button:focus-visible {
   display: grid;
 }
 
-.status-success div {
+.status-success div,
+.status-generation div {
   display: grid;
   grid-template-columns: 132px minmax(0, 1fr);
   gap: 16px;
@@ -134,13 +135,26 @@ button:focus-visible {
   padding: 14px 18px;
 }
 
-.status-success div + div {
+.status-success div + div,
+.status-generation div + div {
   border-top: 1px solid var(--border);
 }
 
-.status-success code {
+.status-success code,
+.status-generation code {
   min-width: 0;
   overflow-wrap: anywhere;
+}
+
+.generation-action {
+  align-self: start;
+  min-height: 44px;
+  padding: 0 18px;
+  font-size: 14px;
+}
+
+.status-generation {
+  display: grid;
 }
 
 @media (max-width: 620px) {
@@ -157,7 +171,8 @@ button:focus-visible {
     min-height: 52px;
   }
 
-  .status-success div {
+  .status-success div,
+  .status-generation div {
     grid-template-columns: 1fr;
     gap: 7px;
   }

@@ -30,7 +30,7 @@ def test_workspace_initialization_creates_directories_and_database(tmp_path: Pat
             "SELECT value FROM workspace_meta WHERE key = 'schema_version'"
         ).fetchone()[0]
 
-    assert schema_version == "1"
+    assert schema_version == "2"
 
 
 def test_valid_svg_upload_creates_source_run_and_artifact(tmp_path: Path) -> None:

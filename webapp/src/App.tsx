@@ -21,14 +21,45 @@ type UploadResponse = {
   run: UploadRun
 }
 
+type CandidateSummary = {
+  id: string
+  generationId: string
+  generationNumber: number
+  position: number
+  originType: string
+  artifactPath: string | null
+  byteSize: number | null
+  sha256: string | null
+  validationStatus: string
+  validationMessage: string | null
+}
+
+type GenerationSummary = {
+  id: string
+  runId: string
+  generationNumber: number
+  status: string
+  totalCandidateCount: number
+  readyCount: number
+  failedCount: number
+  candidates: CandidateSummary[]
+}
+
+type GenerationResponse = {
+  generation: GenerationSummary
+}
+
 const apiBaseUrl =
   import.meta.env.VITE_MODEL_BUILDER_URL ?? 'http://localhost:8000'
 
 function App() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [result, setResult] = useState<UploadResponse | null>(null)
+  const [generation, setGeneration] = useState<GenerationSummary | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [generationError, setGenerationError] = useState<string | null>(null)
   const [isUploading, setIsUploading] = useState(false)
+  const [isGenerating, setIsGenerating] = useState(false)
 
   const selectedFileLabel = useMemo(() => {
     if (!selectedFile) {
@@ -43,6 +74,7 @@ function App() {
     if (!selectedFile) {
       setError('Choose an SVG file before starting a run.')
       setResult(null)
+      setGeneration(null)
       return
     }
 
@@ -52,6 +84,8 @@ function App() {
     setIsUploading(true)
     setError(null)
     setResult(null)
+    setGeneration(null)
+    setGenerationError(null)
 
     try {
       const response = await fetch(`${apiBaseUrl}/sources`, {
@@ -76,6 +110,39 @@ function App() {
     }
   }
 
+  async function handleGenerateCandidates() {
+    if (!result) {
+      return
+    }
+
+    setIsGenerating(true)
+    setGenerationError(null)
+
+    try {
+      const response = await fetch(
+        `${apiBaseUrl}/runs/${result.run.id}/generations`,
+        {
+          method: 'POST',
+        },
+      )
+      const body = await response.json().catch(() => null)
+
+      if (!response.ok) {
+        throw new Error(body?.detail ?? 'Candidate generation failed.')
+      }
+
+      setGeneration((body as GenerationResponse).generation)
+    } catch (generateError) {
+      setGenerationError(
+        generateError instanceof Error
+          ? generateError.message
+          : 'Candidate generation failed unexpectedly.',
+      )
+    } finally {
+      setIsGenerating(false)
+    }
+  }
+
   return (
     <main className="app-shell">
       <section className="upload-panel" aria-labelledby="upload-title">
@@ -95,6 +162,8 @@ function App() {
                 setSelectedFile(event.target.files?.[0] ?? null)
                 setError(null)
                 setResult(null)
+                setGeneration(null)
+                setGenerationError(null)
               }}
             />
           </label>
@@ -112,26 +181,72 @@ function App() {
         ) : null}
 
         {result ? (
-          <section className="status status-success" aria-label="Upload result">
+          <>
+            <section className="status status-success" aria-label="Upload result">
+              <div>
+                <span>Source ID</span>
+                <code>{result.source.id}</code>
+              </div>
+              <div>
+                <span>Run ID</span>
+                <code>{result.run.id}</code>
+              </div>
+              <div>
+                <span>Status</span>
+                <code>{result.run.status}</code>
+              </div>
+              <div>
+                <span>SHA-256</span>
+                <code>{result.source.sha256}</code>
+              </div>
+              <div>
+                <span>Stored path</span>
+                <code>{result.source.artifactPath}</code>
+              </div>
+            </section>
+
+            <button
+              className="generation-action"
+              type="button"
+              onClick={handleGenerateCandidates}
+              disabled={isGenerating || generation !== null}
+            >
+              {isGenerating ? 'Generating...' : 'Generate candidates'}
+            </button>
+          </>
+        ) : null}
+
+        {generationError ? (
+          <div className="status status-error" role="alert">
+            <span>Generation error</span>
+            <p>{generationError}</p>
+          </div>
+        ) : null}
+
+        {generation ? (
+          <section
+            className="status status-generation"
+            aria-label="Generation result"
+          >
             <div>
-              <span>Source ID</span>
-              <code>{result.source.id}</code>
-            </div>
-            <div>
-              <span>Run ID</span>
-              <code>{result.run.id}</code>
+              <span>Generation</span>
+              <code>{generation.generationNumber}</code>
             </div>
             <div>
               <span>Status</span>
-              <code>{result.run.status}</code>
+              <code>{generation.status}</code>
             </div>
             <div>
-              <span>SHA-256</span>
-              <code>{result.source.sha256}</code>
+              <span>Generated</span>
+              <code>{generation.totalCandidateCount}</code>
             </div>
             <div>
-              <span>Stored path</span>
-              <code>{result.source.artifactPath}</code>
+              <span>Ready</span>
+              <code>{generation.readyCount}</code>
+            </div>
+            <div>
+              <span>Failed</span>
+              <code>{generation.failedCount}</code>
             </div>
           </section>
         ) : null}

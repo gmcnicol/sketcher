@@ -1,0 +1,30 @@
+services:
+  webapp:
+    build:
+      context: ./webapp
+    command: npm run dev -- --host 0.0.0.0
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./webapp:/app
+      - webapp_node_modules:/app/node_modules
+    environment:
+      VITE_MODEL_BUILDER_URL: http://localhost:8000
+    depends_on:
+      - model-builder
+
+  model-builder:
+    build:
+      context: ./model-builder
+    command: uv run python -m http.server 8000
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./model-builder:/app
+      - ./.sketcher:/workspace/.sketcher
+    environment:
+      SKETCHER_WORKSPACE: /workspace/.sketcher
+      SKETCHER_MODEL_ARTIFACTS: /workspace/.sketcher/models
+
+volumes:
+  webapp_node_modules:

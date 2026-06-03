@@ -11,6 +11,9 @@ env/
 !.env.example
 .uv-cache/
 
+# Sketcher workspace
+.sketcher/
+
 # Python build, test, and type-check artifacts
 build/
 dist/
@@ -39,6 +42,7 @@ pnpm-debug.log*
 coverage/
 .nyc_output/
 .vite/
+webapp/dist/
 .next/
 out/
 

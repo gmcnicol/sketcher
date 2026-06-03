@@ -1,0 +1,22 @@
+[project]
+name = "model-builder"
+version = "0.1.0"
+description = "Sketcher model builder and SVG sketch generation tools."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+sketch = "sketcher_model_builder.generator:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sketcher_model_builder"]

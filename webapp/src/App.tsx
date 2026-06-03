@@ -311,12 +311,19 @@ function App() {
       } else if (key === 'u') {
         event.preventDefault()
         void undoReviewDecision()
+      } else if (
+        key === 'b' &&
+        review?.complete &&
+        review.survivorCount > 0
+      ) {
+        event.preventDefault()
+        void createNextGeneration('breed')
       }
     }
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [submitReviewDecision, undoReviewDecision])
+  }, [createNextGeneration, review, submitReviewDecision, undoReviewDecision])
 
   const currentCandidate = review?.currentCandidate ?? null
 
@@ -487,7 +494,7 @@ function ReviewDeck({
                 onClick={() => onNextGeneration('breed')}
                 disabled={isBusy}
               >
-                {isGenerating ? 'Breeding...' : 'Breed next generation'}
+                {isGenerating ? 'Breeding...' : 'Breed next generation (b)'}
               </button>
             ) : (
               <button

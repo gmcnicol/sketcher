@@ -10,6 +10,8 @@
   --error-bg: #fff4f2;
   --error-border: #f2b8ad;
   --code-bg: #eef1f5;
+  --candidate-canvas: #fbfcfd;
+  --candidate-canvas-border: #b8c0cc;
 
   --sans: Inter, ui-sans-serif, system-ui, 'Segoe UI', Roboto, sans-serif;
   --mono: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
@@ -37,6 +39,8 @@
     --error-bg: #331412;
     --error-border: #7a2e25;
     --code-bg: #212936;
+    --candidate-canvas: #fbfcfd;
+    --candidate-canvas-border: #637083;
   }
 }
 

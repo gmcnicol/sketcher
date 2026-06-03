@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, File, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
 
 from .generations import (
     DuplicateGenerationError,
@@ -23,6 +26,26 @@ from .workspace import (
     ensure_workspace,
     store_source_upload,
 )
+from .review import (
+    CandidateArtifactError,
+    CandidateNotReadyError,
+    CandidateScopeError,
+    DuplicateDecisionError,
+    NothingToUndoError,
+    ReviewCompleteError,
+    ReviewError,
+    UnknownCandidateError,
+    get_current_review_state,
+    load_candidate_artifact,
+    record_candidate_decision,
+    review_state_to_api,
+    undo_latest_decision,
+)
+
+
+class ReviewDecisionRequest(BaseModel):
+    candidateId: str
+    decision: Literal["survived", "rejected"]
 
 
 def configured_cors_origins() -> list[str]:
@@ -32,6 +55,8 @@ def configured_cors_origins() -> list[str]:
     return [
         "http://localhost:5173",
         "http://127.0.0.1:5173",
+        "http://localhost:5174",
+        "http://127.0.0.1:5174",
     ]
 
 
@@ -119,5 +144,85 @@ def create_app(workspace: Path | None = None) -> FastAPI:
             ) from error
 
         return {"generation": generation_summary_to_api(summary)}
+
+    @app.get("/runs/{run_id}/review/current")
+    def get_run_review(run_id: str) -> dict[str, object]:
+        try:
+            state = get_current_review_state(app.state.workspace, run_id)
+        except (UnknownRunError, MissingGenerationError) as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=str(error),
+            ) from error
+
+        return {"review": review_state_to_api(state)}
+
+    @app.post("/runs/{run_id}/review/decisions")
+    def create_review_decision(
+        run_id: str,
+        request: ReviewDecisionRequest,
+    ) -> dict[str, object]:
+        try:
+            state = record_candidate_decision(
+                app.state.workspace,
+                run_id,
+                candidate_id=request.candidateId,
+                decision=request.decision,
+            )
+        except (UnknownRunError, MissingGenerationError, UnknownCandidateError) as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=str(error),
+            ) from error
+        except (DuplicateDecisionError, ReviewCompleteError) as error:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(error),
+            ) from error
+        except (CandidateScopeError, CandidateNotReadyError, ReviewError) as error:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(error),
+            ) from error
+
+        return {"review": review_state_to_api(state)}
+
+    @app.post("/runs/{run_id}/review/undo")
+    def undo_review_decision(run_id: str) -> dict[str, object]:
+        try:
+            state = undo_latest_decision(app.state.workspace, run_id)
+        except (UnknownRunError, MissingGenerationError) as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=str(error),
+            ) from error
+        except NothingToUndoError as error:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(error),
+            ) from error
+
+        return {"review": review_state_to_api(state)}
+
+    @app.get("/candidates/{candidate_id}/artifact")
+    def get_candidate_artifact(candidate_id: str) -> FileResponse:
+        try:
+            artifact = load_candidate_artifact(app.state.workspace, candidate_id)
+        except UnknownCandidateError as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=str(error),
+            ) from error
+        except CandidateArtifactError as error:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(error),
+            ) from error
+
+        return FileResponse(
+            artifact.path,
+            media_type="image/svg+xml",
+            headers={"X-Content-SHA256": artifact.sha256},
+        )
 
     return app

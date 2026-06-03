@@ -13,8 +13,10 @@ from pathlib import Path
 
 import uuid_utils
 
+from .generator import clean_svg_bytes_for_export
 
-SCHEMA_VERSION = 2
+
+SCHEMA_VERSION = 3
 ALLOWED_SVG_CONTENT_TYPES = {"image/svg+xml"}
 
 
@@ -146,6 +148,28 @@ def ensure_workspace(workspace: Path) -> Path:
         )
         db.execute(
             """
+            CREATE TABLE IF NOT EXISTS candidate_decisions (
+                id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                generation_id TEXT NOT NULL,
+                candidate_id TEXT NOT NULL,
+                decision TEXT NOT NULL CHECK (decision IN ('survived', 'rejected')),
+                created_at TEXT NOT NULL,
+                undone_at TEXT,
+                FOREIGN KEY (run_id) REFERENCES runs(id),
+                FOREIGN KEY (generation_id) REFERENCES generations(id),
+                FOREIGN KEY (candidate_id) REFERENCES candidates(id)
+            )
+            """
+        )
+        db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_candidate_decisions_generation_active
+            ON candidate_decisions (generation_id, candidate_id, undone_at, created_at)
+            """
+        )
+        db.execute(
+            """
             INSERT INTO workspace_meta (key, value)
             VALUES ('schema_version', ?)
             ON CONFLICT(key) DO UPDATE SET value = excluded.value
@@ -197,23 +221,24 @@ def store_source_upload(
     data: bytes,
 ) -> UploadResult:
     validate_svg_upload(filename, content_type, data)
+    clean_data = clean_svg_bytes_for_export(data)
 
     workspace = ensure_workspace(workspace)
     source_id = new_uuid7()
     run_id = new_uuid7()
     created_at = utc_now()
-    sha256 = hashlib.sha256(data).hexdigest()
+    sha256 = hashlib.sha256(clean_data).hexdigest()
     artifact_path = Path("artifacts") / "sources" / f"{sha256[:12]}-{sanitize_filename(filename)}"
     absolute_artifact_path = workspace / artifact_path
     absolute_artifact_path.parent.mkdir(parents=True, exist_ok=True)
 
-    absolute_artifact_path.write_bytes(data)
+    absolute_artifact_path.write_bytes(clean_data)
 
     source = SourceRecord(
         id=source_id,
         filename=filename,
         content_type=content_type,
-        byte_size=len(data),
+        byte_size=len(clean_data),
         sha256=sha256,
         artifact_path=artifact_path.as_posix(),
         created_at=created_at,

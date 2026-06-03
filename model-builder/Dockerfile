@@ -9,4 +9,4 @@ COPY tests ./tests
 RUN uv sync --dev
 
 EXPOSE 8000
-CMD ["uv", "run", "python", "-m", "http.server", "8000"]
+CMD ["uv", "run", "uvicorn", "sketcher_model_builder.api:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]

@@ -253,6 +253,12 @@ button:focus-visible {
   gap: 12px;
 }
 
+.review-complete-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
 .review-actions button,
 .review-complete button {
   min-height: 52px;
@@ -309,6 +315,13 @@ button:focus-visible {
   justify-content: flex-start;
 }
 
+.review-note {
+  max-width: 62ch;
+  margin: 0;
+  color: var(--text-h);
+  line-height: 1.45;
+}
+
 .review-empty {
   padding: 18px;
   border: 1px solid var(--border);
@@ -358,5 +371,10 @@ button:focus-visible {
   .candidate-meta,
   .review-actions {
     grid-template-columns: 1fr;
+  }
+
+  .review-complete-actions {
+    width: 100%;
+    flex-direction: column;
   }
 }

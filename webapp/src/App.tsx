@@ -69,6 +69,7 @@ type ReviewResponse = {
 }
 
 type ReviewDecision = 'survived' | 'rejected'
+type NextGenerationMode = 'breed' | 'reroll'
 
 const apiBaseUrl =
   import.meta.env.VITE_MODEL_BUILDER_URL ?? 'http://localhost:8000'
@@ -253,6 +254,47 @@ function App() {
     }
   }, [isReviewing, result, review])
 
+  const createNextGeneration = useCallback(
+    async (mode: NextGenerationMode) => {
+      if (isGenerating || !result || !review?.complete) {
+        return
+      }
+
+      setIsGenerating(true)
+      setReviewError(null)
+      setGenerationError(null)
+
+      try {
+        const response = await fetch(
+          `${apiBaseUrl}/runs/${result.run.id}/generations/next`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mode }),
+          },
+        )
+        const body = await response.json().catch(() => null)
+
+        if (!response.ok) {
+          throw new Error(body?.detail ?? 'Next generation failed.')
+        }
+
+        const generationBody = body as GenerationResponse
+        setGeneration(generationBody.generation)
+        await fetchReview(result.run.id)
+      } catch (nextGenerationError) {
+        setReviewError(
+          nextGenerationError instanceof Error
+            ? nextGenerationError.message
+            : 'Next generation failed unexpectedly.',
+        )
+      } finally {
+        setIsGenerating(false)
+      }
+    },
+    [fetchReview, isGenerating, result, review],
+  )
+
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
       if (isEditableTarget(event.target)) {
@@ -366,10 +408,12 @@ function App() {
             review={review}
             candidate={currentCandidate}
             isReviewing={isReviewing}
+            isGenerating={isGenerating}
             reviewError={reviewError}
             onSurvive={() => void submitReviewDecision('survived')}
             onReject={() => void submitReviewDecision('rejected')}
             onUndo={() => void undoReviewDecision()}
+            onNextGeneration={(mode) => void createNextGeneration(mode)}
           />
         ) : null}
       </section>
@@ -382,10 +426,12 @@ type ReviewDeckProps = {
   review: ReviewState | null
   candidate: CandidateSummary | null
   isReviewing: boolean
+  isGenerating: boolean
   reviewError: string | null
   onSurvive: () => void
   onReject: () => void
   onUndo: () => void
+  onNextGeneration: (mode: NextGenerationMode) => void
 }
 
 function ReviewDeck({
@@ -393,10 +439,12 @@ function ReviewDeck({
   review,
   candidate,
   isReviewing,
+  isGenerating,
   reviewError,
   onSurvive,
   onReject,
   onUndo,
+  onNextGeneration,
 }: ReviewDeckProps) {
   if (!review) {
     return (
@@ -407,6 +455,10 @@ function ReviewDeck({
   }
 
   if (review.complete) {
+    const hasSurvivors = review.survivorCount > 0
+    const hasLowDiversity = review.survivorCount > 0 && review.survivorCount <= 2
+    const isBusy = isReviewing || isGenerating
+
     return (
       <section className="review-deck" aria-label="Review complete">
         <div className="review-complete">
@@ -417,14 +469,44 @@ function ReviewDeck({
             <span>{review.survivorCount} survived</span>
             <span>{review.rejectedCount} rejected</span>
           </div>
-          <button
-            className="secondary-action"
-            type="button"
-            onClick={onUndo}
-            disabled={isReviewing || review.reviewedCount === 0}
-          >
-            Undo (u)
-          </button>
+          {hasLowDiversity ? (
+            <p className="review-note">
+              Low survivor diversity. The next generation will include extra fresh
+              candidates.
+            </p>
+          ) : null}
+          {!hasSurvivors ? (
+            <p className="review-note">
+              No survivors remain. Reroll the next generation with fresh candidates.
+            </p>
+          ) : null}
+          <div className="review-complete-actions">
+            {hasSurvivors ? (
+              <button
+                type="button"
+                onClick={() => onNextGeneration('breed')}
+                disabled={isBusy}
+              >
+                {isGenerating ? 'Breeding...' : 'Breed next generation'}
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => onNextGeneration('reroll')}
+                disabled={isBusy}
+              >
+                {isGenerating ? 'Rerolling...' : 'Reroll generation'}
+              </button>
+            )}
+            <button
+              className="secondary-action"
+              type="button"
+              onClick={onUndo}
+              disabled={isBusy || review.reviewedCount === 0}
+            >
+              Undo (u)
+            </button>
+          </div>
           {reviewError ? (
             <div className="status status-error" role="alert">
               <span>Review error</span>

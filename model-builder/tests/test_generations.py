@@ -4,6 +4,7 @@ import sqlite3
 import uuid
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from sketcher_model_builder import generations
@@ -32,6 +33,43 @@ def fetch_rows(workspace: Path, table: str) -> list[sqlite3.Row]:
     with sqlite3.connect(workspace / "sketcher.sqlite3") as db:
         db.row_factory = sqlite3.Row
         return db.execute(f"SELECT * FROM {table} ORDER BY created_at, id").fetchall()
+
+
+def install_fast_renderer(monkeypatch) -> None:
+    def fake_render_candidate_svg(
+        source_path: Path,
+        artifact_path: Path,
+        render_parameters: dict,
+    ) -> None:
+        artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        seed = render_parameters["seed"]
+        artifact_path.write_text(
+            f"""<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">
+  <path d="M 1 1 L 9 9" style="fill:none;stroke:#111;stroke-width:1;stroke-opacity:1" data-sketcher-pass="{seed}" />
+</svg>
+""",
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(generations, "render_candidate_svg", fake_render_candidate_svg)
+
+
+def review_generation(
+    client: TestClient,
+    run_id: str,
+    candidates: list[dict],
+    *,
+    survivor_count: int,
+) -> None:
+    for index, candidate in enumerate(candidates):
+        decision = "survived" if index < survivor_count else "rejected"
+        response = client.post(
+            f"/runs/{run_id}/review/decisions",
+            json={"candidateId": candidate["id"], "decision": decision},
+        )
+        assert response.status_code == 200
+    assert client.get(f"/runs/{run_id}/review/current").json()["review"]["complete"]
 
 
 def test_generation_endpoint_creates_first_generation_with_24_ready_candidates(
@@ -188,3 +226,229 @@ def test_failed_render_attempts_are_persisted_and_excluded_from_ready_counts(
     assert len(failed) == 2
     assert len(ready) == 24
     assert {row["validation_message"] for row in failed} == {"forced render failure"}
+
+
+def test_next_generation_requires_completed_review(tmp_path: Path, monkeypatch) -> None:
+    install_fast_renderer(monkeypatch)
+    workspace = tmp_path / "workspace"
+    client = TestClient(create_app(workspace))
+    run_id = upload_source(client)["run"]["id"]
+    client.post(f"/runs/{run_id}/generations")
+
+    response = client.post(
+        f"/runs/{run_id}/generations/next",
+        json={"mode": "breed"},
+    )
+
+    assert response.status_code == 409
+    assert "review must be complete" in response.json()["detail"]
+
+
+def test_zero_survivors_blocks_breed_and_allows_reroll(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    install_fast_renderer(monkeypatch)
+    workspace = tmp_path / "workspace"
+    client = TestClient(create_app(workspace))
+    run_id = upload_source(client)["run"]["id"]
+    generation = client.post(f"/runs/{run_id}/generations").json()["generation"]
+    review_generation(client, run_id, generation["candidates"], survivor_count=0)
+
+    breed_response = client.post(
+        f"/runs/{run_id}/generations/next",
+        json={"mode": "breed"},
+    )
+    reroll_response = client.post(
+        f"/runs/{run_id}/generations/next",
+        json={"mode": "reroll"},
+    )
+
+    assert breed_response.status_code == 409
+    assert "Reroll this generation instead" in breed_response.json()["detail"]
+    assert reroll_response.status_code == 201
+    next_generation = reroll_response.json()["generation"]
+    assert next_generation["generationNumber"] == 2
+    assert next_generation["readyCount"] == 24
+    assert {candidate["originType"] for candidate in next_generation["candidates"]} == {
+        "random_immigrant"
+    }
+    assert all(
+        candidate["genome"]["parentCandidateIds"] == []
+        for candidate in next_generation["candidates"]
+    )
+
+
+@pytest.mark.parametrize("survivor_count", [1, 2])
+def test_low_diversity_breed_creates_four_immigrants(
+    tmp_path: Path,
+    monkeypatch,
+    survivor_count: int,
+) -> None:
+    install_fast_renderer(monkeypatch)
+    workspace = tmp_path / "workspace"
+    client = TestClient(create_app(workspace))
+    run_id = upload_source(client)["run"]["id"]
+    generation = client.post(f"/runs/{run_id}/generations").json()["generation"]
+    review_generation(client, run_id, generation["candidates"], survivor_count=survivor_count)
+
+    response = client.post(
+        f"/runs/{run_id}/generations/next",
+        json={"mode": "breed"},
+    )
+
+    assert response.status_code == 201
+    candidates = response.json()["generation"]["candidates"]
+    ready_candidates = [
+        candidate for candidate in candidates if candidate["validationStatus"] == "ready"
+    ]
+    assert len([c for c in ready_candidates if c["originType"] == "random_immigrant"]) == 4
+    assert (
+        len([c for c in ready_candidates if c["originType"] == "survivor_carryover"])
+        == survivor_count
+    )
+    assert (
+        len([c for c in ready_candidates if c["originType"] == "survivor_mutation"])
+        == 24 - 4 - survivor_count
+    )
+
+
+def test_normal_breed_creates_two_immigrants(tmp_path: Path, monkeypatch) -> None:
+    install_fast_renderer(monkeypatch)
+    workspace = tmp_path / "workspace"
+    client = TestClient(create_app(workspace))
+    run_id = upload_source(client)["run"]["id"]
+    generation = client.post(f"/runs/{run_id}/generations").json()["generation"]
+    review_generation(client, run_id, generation["candidates"], survivor_count=5)
+
+    response = client.post(
+        f"/runs/{run_id}/generations/next",
+        json={"mode": "breed"},
+    )
+
+    assert response.status_code == 201
+    ready_candidates = [
+        candidate
+        for candidate in response.json()["generation"]["candidates"]
+        if candidate["validationStatus"] == "ready"
+    ]
+    assert len([c for c in ready_candidates if c["originType"] == "random_immigrant"]) == 2
+    assert len([c for c in ready_candidates if c["originType"] == "survivor_carryover"]) == 5
+    assert len([c for c in ready_candidates if c["originType"] == "survivor_mutation"]) == 17
+
+
+def test_survivor_carryovers_are_appended_last_and_capped(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    install_fast_renderer(monkeypatch)
+    workspace = tmp_path / "workspace"
+    client = TestClient(create_app(workspace))
+    run_id = upload_source(client)["run"]["id"]
+    generation = client.post(f"/runs/{run_id}/generations").json()["generation"]
+    review_generation(client, run_id, generation["candidates"], survivor_count=12)
+
+    response = client.post(
+        f"/runs/{run_id}/generations/next",
+        json={"mode": "breed"},
+    )
+
+    assert response.status_code == 201
+    candidates = [
+        candidate
+        for candidate in response.json()["generation"]["candidates"]
+        if candidate["validationStatus"] == "ready"
+    ]
+    carryovers = [c for c in candidates if c["originType"] == "survivor_carryover"]
+    assert len(carryovers) == 8
+    assert [candidate["originType"] for candidate in candidates[-8:]] == [
+        "survivor_carryover"
+    ] * 8
+    assert [c["genome"]["parentCandidateIds"][0] for c in carryovers] == [
+        candidate["id"] for candidate in generation["candidates"][:8]
+    ]
+
+
+def test_carryovers_must_be_reviewed_again_in_new_generation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    install_fast_renderer(monkeypatch)
+    workspace = tmp_path / "workspace"
+    client = TestClient(create_app(workspace))
+    run_id = upload_source(client)["run"]["id"]
+    generation = client.post(f"/runs/{run_id}/generations").json()["generation"]
+    review_generation(client, run_id, generation["candidates"], survivor_count=3)
+
+    next_generation = client.post(
+        f"/runs/{run_id}/generations/next",
+        json={"mode": "breed"},
+    ).json()["generation"]
+    review = client.get(f"/runs/{run_id}/review/current").json()["review"]
+
+    assert review["generationId"] == next_generation["id"]
+    assert review["reviewedCount"] == 0
+    assert review["survivorCount"] == 0
+    assert review["totalReadyCount"] == 24
+    assert len(fetch_rows(workspace, "candidate_decisions")) == 24
+
+
+def test_undone_survived_decisions_do_not_count_as_active_survivors(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    install_fast_renderer(monkeypatch)
+    workspace = tmp_path / "workspace"
+    client = TestClient(create_app(workspace))
+    run_id = upload_source(client)["run"]["id"]
+    generation = client.post(f"/runs/{run_id}/generations").json()["generation"]
+
+    survived_response = client.post(
+        f"/runs/{run_id}/review/decisions",
+        json={"candidateId": generation["candidates"][0]["id"], "decision": "survived"},
+    )
+    undo_response = client.post(f"/runs/{run_id}/review/undo")
+    assert survived_response.status_code == 200
+    assert undo_response.status_code == 200
+    review_generation(client, run_id, generation["candidates"], survivor_count=0)
+
+    response = client.post(
+        f"/runs/{run_id}/generations/next",
+        json={"mode": "breed"},
+    )
+
+    assert response.status_code == 409
+    assert "Reroll this generation instead" in response.json()["detail"]
+
+
+def test_next_generation_artifacts_are_workspace_relative_and_hash_checked(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    install_fast_renderer(monkeypatch)
+    workspace = tmp_path / "workspace"
+    client = TestClient(create_app(workspace))
+    run_id = upload_source(client)["run"]["id"]
+    generation = client.post(f"/runs/{run_id}/generations").json()["generation"]
+    review_generation(client, run_id, generation["candidates"], survivor_count=1)
+
+    next_generation = client.post(
+        f"/runs/{run_id}/generations/next",
+        json={"mode": "breed"},
+    ).json()["generation"]
+    carryover = next(
+        candidate
+        for candidate in next_generation["candidates"]
+        if candidate["originType"] == "survivor_carryover"
+    )
+    artifact_path = Path(carryover["artifactPath"])
+    artifact_bytes = (workspace / artifact_path).read_bytes()
+
+    assert not artifact_path.is_absolute()
+    assert artifact_path.parts[:2] == ("artifacts", "candidates")
+    assert carryover["byteSize"] == len(artifact_bytes)
+    assert carryover["sha256"] == hashlib.sha256(artifact_bytes).hexdigest()
+    assert carryover["sha256"] == generation["candidates"][0]["sha256"]
+    artifact_response = client.get(f"/candidates/{carryover['id']}/artifact")
+    assert artifact_response.status_code == 200
+    assert artifact_response.headers["x-content-sha256"] == carryover["sha256"]

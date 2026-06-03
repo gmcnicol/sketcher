@@ -803,8 +803,8 @@ def humanize_dense_strokes(render_parameters: dict[str, Any]) -> dict[str, Any]:
                 0.52,
             ),
             "opacity": clamp_float(
-                float(render_parameters["opacity"]) * retrace_scale,
-                0.003,
+                scale_density_opacity(float(render_parameters["opacity"]), retrace_scale),
+                0.028,
                 0.16,
             ),
             "shade_width": clamp_float(
@@ -813,8 +813,8 @@ def humanize_dense_strokes(render_parameters: dict[str, Any]) -> dict[str, Any]:
                 2.4,
             ),
             "shade_opacity": clamp_float(
-                float(render_parameters["shade_opacity"]) * shade_scale,
-                0.004,
+                scale_density_opacity(float(render_parameters["shade_opacity"]), shade_scale),
+                0.03,
                 0.32,
             ),
             "jitter": clamp_float(
@@ -837,6 +837,10 @@ def density_scale(count: int, baseline: int) -> float:
     if count <= baseline:
         return 1.0
     return math.sqrt(baseline / count)
+
+
+def scale_density_opacity(opacity: float, density_scale_value: float) -> float:
+    return opacity * math.sqrt(density_scale_value)
 
 
 def mutate_int_parameter(

@@ -270,13 +270,15 @@ def test_dense_survivor_strokes_are_thin_light_and_more_human() -> None:
 
     assert repeat_mutation["repeats"] > 1000
     assert repeat_mutation["stroke_width"] < 0.06
-    assert repeat_mutation["opacity"] < 0.02
+    assert repeat_mutation["opacity"] >= 0.028
+    assert repeat_mutation["opacity"] < 0.04
     assert repeat_mutation["jitter"] > parent_parameters["jitter"]
     assert repeat_mutation["roughness"] > parent_parameters["roughness"]
 
     assert shade_mutation["shade_strokes"] > 1000
     assert shade_mutation["shade_width"] < 0.3
-    assert shade_mutation["shade_opacity"] < 0.04
+    assert shade_mutation["shade_opacity"] >= 0.03
+    assert shade_mutation["shade_opacity"] < 0.08
     assert shade_mutation["roughness"] > parent_parameters["roughness"]
 
 

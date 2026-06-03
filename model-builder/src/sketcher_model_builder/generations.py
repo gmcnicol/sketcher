@@ -36,6 +36,10 @@ SHADE_STROKES_MAX = 3000
 SHADE_STROKES_MUTATION_DELTA = 3000
 DENSE_REPEATS_BASELINE = 60
 DENSE_SHADE_STROKES_BASELINE = 90
+DENSE_STROKE_WIDTH_FLOOR = 0.095
+DENSE_STROKE_OPACITY_FLOOR = 0.058
+DENSE_SHADE_WIDTH_FLOOR = 0.22
+DENSE_SHADE_OPACITY_FLOOR = 0.07
 SKETCH_PATH_MARKERS = {
     "data-sketcher-pass",
     "data-sketcher-flow-pass",
@@ -516,10 +520,16 @@ def build_first_generation_genome(run_id: str, attempt: int) -> dict[str, Any]:
                 "shade_strokes": 0,
                 "jitter": 0.08,
                 "roughness": 0.38,
-                "stroke_width": 0.22,
-                "opacity": 0.075,
+                "stroke_width": 0.32,
+                "opacity": 0.13,
                 "shade_width": 0.8,
                 "shade_opacity": 0.08,
+                "stroke_fragment_min": 0.22,
+                "stroke_fragment_max": 0.95,
+                "stroke_fragment_probability": 0.82,
+                "pressure_variance": 0.5,
+                "strength_variance": 0.42,
+                "full_retrace_interval": 11,
             },
         ),
         (
@@ -530,10 +540,16 @@ def build_first_generation_genome(run_id: str, attempt: int) -> dict[str, Any]:
                 "shade_strokes": 58,
                 "jitter": 0.07,
                 "roughness": 0.42,
-                "stroke_width": 0.2,
-                "opacity": 0.06,
+                "stroke_width": 0.3,
+                "opacity": 0.11,
                 "shade_width": 1.15,
-                "shade_opacity": 0.14,
+                "shade_opacity": 0.18,
+                "stroke_fragment_min": 0.12,
+                "stroke_fragment_max": 0.76,
+                "stroke_fragment_probability": 0.62,
+                "pressure_variance": 0.68,
+                "strength_variance": 0.58,
+                "full_retrace_interval": 17,
             },
         ),
         (
@@ -544,10 +560,16 @@ def build_first_generation_genome(run_id: str, attempt: int) -> dict[str, Any]:
                 "shade_strokes": 18,
                 "jitter": 0.05,
                 "roughness": 0.62,
-                "stroke_width": 0.17,
-                "opacity": 0.052,
+                "stroke_width": 0.28,
+                "opacity": 0.1,
                 "shade_width": 1.45,
-                "shade_opacity": 0.18,
+                "shade_opacity": 0.22,
+                "stroke_fragment_min": 0.08,
+                "stroke_fragment_max": 0.58,
+                "stroke_fragment_probability": 0.48,
+                "pressure_variance": 0.82,
+                "strength_variance": 0.72,
+                "full_retrace_interval": 0,
             },
         ),
     ]
@@ -562,6 +584,36 @@ def build_first_generation_genome(run_id: str, attempt: int) -> dict[str, Any]:
             "keep_original": False,
             "stroke": "#111111",
             "stroke_order_distance_weight": 1.0,
+            "stroke_fragment_min": clamp_float(
+                render_parameters["stroke_fragment_min"] * rng.uniform(0.65, 1.4),
+                0.04,
+                0.45,
+            ),
+            "stroke_fragment_max": clamp_float(
+                render_parameters["stroke_fragment_max"] * rng.uniform(0.75, 1.25),
+                0.35,
+                1.0,
+            ),
+            "stroke_fragment_probability": clamp_float(
+                render_parameters["stroke_fragment_probability"] * rng.uniform(0.72, 1.28),
+                0.18,
+                0.98,
+            ),
+            "pressure_variance": clamp_float(
+                render_parameters["pressure_variance"] * rng.uniform(0.7, 1.35),
+                0.12,
+                1.25,
+            ),
+            "strength_variance": clamp_float(
+                render_parameters["strength_variance"] * rng.uniform(0.7, 1.35),
+                0.12,
+                1.0,
+            ),
+            "full_retrace_interval": clamp_int(
+                render_parameters["full_retrace_interval"] + rng.randint(-3, 4),
+                0,
+                28,
+            ),
             "repeats": clamp_int(
                 render_parameters["repeats"] + rng.randint(-4, 5),
                 REPEATS_MIN,
@@ -584,13 +636,13 @@ def build_first_generation_genome(run_id: str, attempt: int) -> dict[str, Any]:
             ),
             "stroke_width": clamp_float(
                 render_parameters["stroke_width"] * rng.uniform(0.65, 1.6),
-                0.08,
+                0.12,
                 0.52,
             ),
             "opacity": clamp_float(
                 render_parameters["opacity"] * rng.uniform(0.75, 1.4),
-                0.025,
-                0.16,
+                0.07,
+                0.22,
             ),
             "shade_width": clamp_float(
                 render_parameters["shade_width"] * rng.uniform(0.7, 1.55),
@@ -599,11 +651,13 @@ def build_first_generation_genome(run_id: str, attempt: int) -> dict[str, Any]:
             ),
             "shade_opacity": clamp_float(
                 render_parameters["shade_opacity"] * rng.uniform(0.65, 1.45),
-                0.04,
+                0.07,
                 0.32,
             ),
         }
     )
+    if render_parameters["stroke_fragment_min"] > render_parameters["stroke_fragment_max"]:
+        render_parameters["stroke_fragment_min"] = render_parameters["stroke_fragment_max"]
     render_parameters = humanize_dense_strokes(render_parameters)
 
     return {
@@ -758,15 +812,15 @@ def mutate_render_parameters(
         "stroke_width": mutate_float_parameter(
             parent_parameters.get("stroke_width", 0.22),
             rng,
-            minimum=0.08,
+            minimum=0.12,
             maximum=0.52,
             variance=0.16,
         ),
         "opacity": mutate_float_parameter(
             parent_parameters.get("opacity", 0.075),
             rng,
-            minimum=0.025,
-            maximum=0.16,
+            minimum=0.07,
+            maximum=0.22,
             variance=0.14,
         ),
         "shade_width": mutate_float_parameter(
@@ -779,7 +833,7 @@ def mutate_render_parameters(
         "shade_opacity": mutate_float_parameter(
             parent_parameters.get("shade_opacity", 0.14),
             rng,
-            minimum=0.04,
+            minimum=0.07,
             maximum=0.32,
             variance=0.14,
         ),
@@ -791,8 +845,52 @@ def mutate_render_parameters(
             maximum=2.0,
             variance=0.35,
         ),
+        "stroke_fragment_min": mutate_float_parameter(
+            parent_parameters.get("stroke_fragment_min", 0.16),
+            rng,
+            minimum=0.04,
+            maximum=0.45,
+            variance=0.32,
+        ),
+        "stroke_fragment_max": mutate_float_parameter(
+            parent_parameters.get("stroke_fragment_max", 0.82),
+            rng,
+            minimum=0.35,
+            maximum=1.0,
+            variance=0.24,
+        ),
+        "stroke_fragment_probability": mutate_float_parameter(
+            parent_parameters.get("stroke_fragment_probability", 0.7),
+            rng,
+            minimum=0.18,
+            maximum=0.98,
+            variance=0.3,
+        ),
+        "pressure_variance": mutate_float_parameter(
+            parent_parameters.get("pressure_variance", 0.48),
+            rng,
+            minimum=0.12,
+            maximum=1.25,
+            variance=0.32,
+        ),
+        "strength_variance": mutate_float_parameter(
+            parent_parameters.get("strength_variance", 0.45),
+            rng,
+            minimum=0.12,
+            maximum=1.0,
+            variance=0.32,
+        ),
+        "full_retrace_interval": mutate_int_parameter(
+            parent_parameters.get("full_retrace_interval", 13),
+            rng,
+            minimum=0,
+            maximum=28,
+            delta=6,
+        ),
         "keep_original": bool(parent_parameters.get("keep_original", False)),
     }
+    if render_parameters["stroke_fragment_min"] > render_parameters["stroke_fragment_max"]:
+        render_parameters["stroke_fragment_min"] = render_parameters["stroke_fragment_max"]
     return humanize_dense_strokes(render_parameters)
 
 
@@ -808,22 +906,22 @@ def humanize_dense_strokes(render_parameters: dict[str, Any]) -> dict[str, Any]:
         {
             "stroke_width": clamp_float(
                 float(render_parameters["stroke_width"]) * retrace_scale,
-                0.008,
+                DENSE_STROKE_WIDTH_FLOOR,
                 0.52,
             ),
             "opacity": clamp_float(
                 scale_density_opacity(float(render_parameters["opacity"]), retrace_scale),
-                0.028,
-                0.16,
+                DENSE_STROKE_OPACITY_FLOOR,
+                0.22,
             ),
             "shade_width": clamp_float(
                 float(render_parameters["shade_width"]) * shade_scale,
-                0.05,
+                DENSE_SHADE_WIDTH_FLOOR,
                 2.4,
             ),
             "shade_opacity": clamp_float(
                 scale_density_opacity(float(render_parameters["shade_opacity"]), shade_scale),
-                0.03,
+                DENSE_SHADE_OPACITY_FLOOR,
                 0.32,
             ),
             "jitter": clamp_float(

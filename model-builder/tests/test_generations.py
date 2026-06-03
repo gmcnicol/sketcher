@@ -248,7 +248,7 @@ def test_survivor_stroke_count_mutations_can_reach_thousands() -> None:
     assert shade_mutation["shade_strokes"] <= generations.SHADE_STROKES_MAX
 
 
-def test_dense_survivor_strokes_are_thin_light_and_more_human() -> None:
+def test_dense_survivor_strokes_stay_visible_and_more_human() -> None:
     parent_parameters = {
         "repeats": 28,
         "shade_strokes": 58,
@@ -258,6 +258,12 @@ def test_dense_survivor_strokes_are_thin_light_and_more_human() -> None:
         "shade_opacity": 0.14,
         "jitter": 0.08,
         "roughness": 0.45,
+        "stroke_fragment_min": 0.16,
+        "stroke_fragment_max": 0.82,
+        "stroke_fragment_probability": 0.7,
+        "pressure_variance": 0.48,
+        "strength_variance": 0.45,
+        "full_retrace_interval": 13,
     }
 
     repeat_mutation = generations.mutate_render_parameters(
@@ -270,16 +276,19 @@ def test_dense_survivor_strokes_are_thin_light_and_more_human() -> None:
     )
 
     assert repeat_mutation["repeats"] > 1000
-    assert repeat_mutation["stroke_width"] < 0.06
-    assert repeat_mutation["opacity"] >= 0.028
-    assert repeat_mutation["opacity"] < 0.04
+    assert repeat_mutation["stroke_width"] >= generations.DENSE_STROKE_WIDTH_FLOOR
+    assert repeat_mutation["opacity"] >= generations.DENSE_STROKE_OPACITY_FLOOR
     assert repeat_mutation["jitter"] > parent_parameters["jitter"]
     assert repeat_mutation["roughness"] > parent_parameters["roughness"]
+    assert repeat_mutation["stroke_fragment_min"] <= repeat_mutation["stroke_fragment_max"]
+    assert 0.18 <= repeat_mutation["stroke_fragment_probability"] <= 0.98
+    assert 0.12 <= repeat_mutation["pressure_variance"] <= 1.25
+    assert 0.12 <= repeat_mutation["strength_variance"] <= 1.0
+    assert 0 <= repeat_mutation["full_retrace_interval"] <= 28
 
     assert shade_mutation["shade_strokes"] > 1000
-    assert shade_mutation["shade_width"] < 0.3
-    assert shade_mutation["shade_opacity"] >= 0.03
-    assert shade_mutation["shade_opacity"] < 0.08
+    assert shade_mutation["shade_width"] >= generations.DENSE_SHADE_WIDTH_FLOOR
+    assert shade_mutation["shade_opacity"] >= generations.DENSE_SHADE_OPACITY_FLOOR
     assert shade_mutation["roughness"] > parent_parameters["roughness"]
 
 

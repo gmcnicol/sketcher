@@ -764,6 +764,115 @@ def smooth_path_from_points(
     return " ".join(parts)
 
 
+def route_length(route: list[tuple[float, float]]) -> float:
+    return sum(
+        math.hypot(route[index][0] - route[index - 1][0], route[index][1] - route[index - 1][1])
+        for index in range(1, len(route))
+    )
+
+
+def point_at_route_distance(
+    route: list[tuple[float, float]],
+    target_distance: float,
+) -> tuple[float, float]:
+    if not route:
+        raise ValueError("route must contain at least one point")
+    if target_distance <= 0:
+        return route[0]
+
+    travelled = 0.0
+    for index in range(1, len(route)):
+        start = route[index - 1]
+        end = route[index]
+        segment_length = math.hypot(end[0] - start[0], end[1] - start[1])
+        if segment_length == 0:
+            continue
+        if travelled + segment_length >= target_distance:
+            ratio = (target_distance - travelled) / segment_length
+            return (
+                start[0] + (end[0] - start[0]) * ratio,
+                start[1] + (end[1] - start[1]) * ratio,
+            )
+        travelled += segment_length
+
+    return route[-1]
+
+
+def route_fragment(
+    route: list[tuple[float, float]],
+    rng: random.Random,
+    *,
+    min_fraction: float = 0.22,
+    max_fraction: float = 0.82,
+) -> list[tuple[float, float]]:
+    if len(route) <= 2:
+        return route
+
+    length = route_length(route)
+    if length <= 0:
+        return route
+
+    fraction = rng.uniform(min_fraction, max_fraction)
+    fragment_length = max(length * fraction, min(length, 6.0))
+    start_distance = rng.uniform(0, max(length - fragment_length, 0))
+    end_distance = min(start_distance + fragment_length, length)
+
+    fragment = [point_at_route_distance(route, start_distance)]
+    travelled = 0.0
+    for index in range(1, len(route)):
+        previous = route[index - 1]
+        current = route[index]
+        segment_length = math.hypot(current[0] - previous[0], current[1] - previous[1])
+        next_travelled = travelled + segment_length
+        if start_distance < next_travelled and travelled < end_distance:
+            fragment.append(current)
+        travelled = next_travelled
+    fragment[-1] = point_at_route_distance(route, end_distance)
+
+    if len(fragment) < 2:
+        return route
+    return fragment
+
+
+def human_stroke_routes_for_pass(
+    routes: list[list[tuple[float, float]]],
+    rng: random.Random,
+    repeat_index: int,
+    *,
+    fragment_min: float,
+    fragment_max: float,
+    fragment_probability: float,
+    full_retrace_interval: int,
+) -> list[list[tuple[float, float]]]:
+    if repeat_index == 0 or (
+        full_retrace_interval > 0 and repeat_index % full_retrace_interval == 0
+    ):
+        return routes
+
+    fragments: list[list[tuple[float, float]]] = []
+    for route in routes:
+        if len(route) < 2:
+            continue
+        draw_probability = fragment_probability * (0.82 if route_length(route) > 18 else 1.1)
+        draw_probability = max(0.05, min(0.98, draw_probability))
+        if rng.random() > draw_probability:
+            continue
+        min_fraction = max(0.04, min(fragment_min, fragment_max))
+        max_fraction = max(min_fraction, min(1.0, fragment_max))
+        fragments.append(
+            route_fragment(
+                route,
+                rng,
+                min_fraction=rng.uniform(min_fraction * 0.65, min_fraction * 1.35),
+                max_fraction=rng.uniform(max_fraction * 0.75, min(1.0, max_fraction * 1.25)),
+            )
+        )
+
+    if fragments:
+        return fragments
+    return [route_fragment(rng.choice(routes), rng)] if routes else []
+
+
 def route_axis(route: list[tuple[float, float]]) -> str:
     if not route:
         return "horizontal"
@@ -794,7 +903,6 @@ def order_routes_by_nearest_endpoint(
     current = ordered[-1][-1]
     while remaining:
         best_index = 0
-        best_reverse = False
         best_score = math.inf
         for index, route in enumerate(remaining):
             source_order_penalty = index * 100 * source_order_weight
@@ -802,22 +910,11 @@ def order_routes_by_nearest_endpoint(
                 route_endpoint_distance(current, route[0]) * normalized_distance_weight
                 + source_order_penalty
             )
-            reverse_score = (
-                route_endpoint_distance(current, route[-1]) * normalized_distance_weight
-                + source_order_penalty
-            )
             if forward_score < best_score:
                 best_index = index
-                best_reverse = False
                 best_score = forward_score
-            if reverse_score < best_score:
-                best_index = index
-                best_reverse = True
-                best_score = reverse_score
 
         route = remaining.pop(best_index)
-        if best_reverse:
-            route = list(reversed(route))
         ordered.append(route)
         current = route[-1]
 
@@ -1233,6 +1330,12 @@ def sketch_paths(
     roughness: float,
     keep_original: bool,
     stroke_order_distance_weight: float,
+    stroke_fragment_min: float,
+    stroke_fragment_max: float,
+    stroke_fragment_probability: float,
+    pressure_variance: float,
+    strength_variance: float,
+    full_retrace_interval: int,
     rng: random.Random,
 ) -> int:
     defs = get_or_create_defs(root)
@@ -1300,21 +1403,36 @@ def sketch_paths(
                     "d",
                     " ".join(
                         smooth_path_from_points(route, rng, jitter, roughness)
-                        for route in sampled_routes
+                        for route in human_stroke_routes_for_pass(
+                            sampled_routes,
+                            rng,
+                            repeat_index,
+                            fragment_min=stroke_fragment_min,
+                            fragment_max=stroke_fragment_max,
+                            fragment_probability=stroke_fragment_probability,
+                            full_retrace_interval=full_retrace_interval,
+                        )
                     ),
                 )
             else:
                 sampled = sample_path_outline(path.get("d", ""), curve_steps=10)
                 copy.set("d", smooth_path_from_points(sampled, rng, jitter, roughness))
 
+            pressure = rng.lognormvariate(0, pressure_variance)
+            pass_strength = (
+                1 + strength_variance
+                if full_retrace_interval > 0 and repeat_index % full_retrace_interval == 0
+                else rng.uniform(max(0.15, 1 - strength_variance), 1 + strength_variance)
+            )
             style = style_to_dict(copy.get("style"))
             style["fill"] = "none"
             style.pop("fill-opacity", None)
             style["stroke"] = stroke
-            style["stroke-width"] = fmt_number(stroke_width * rng.uniform(0.45, 1.95) * rng.lognormvariate(0, 0.28))
+            style["stroke-width"] = fmt_number(stroke_width * rng.uniform(0.55, 2.35) * pressure)
             style["stroke-linecap"] = "round"
             style["stroke-linejoin"] = "round"
-            style["stroke-opacity"] = fmt_number(min(1, opacity * rng.uniform(0.82, 1.55)))
+            rendered_opacity = opacity * rng.uniform(0.75, 1.9) * pass_strength
+            style["stroke-opacity"] = fmt_number(max(min(0.07, opacity), min(1, rendered_opacity)))
             style.pop("display", None)
             copy.set("style", dict_to_style(style))
             copy.set("data-sketcher-pass", str(repeat_index + 1))
@@ -1343,6 +1461,12 @@ def render_sketch_svg(
     seed: int = 7,
     keep_original: bool = False,
     stroke_order_distance_weight: float = 1.0,
+    stroke_fragment_min: float = 0.16,
+    stroke_fragment_max: float = 0.82,
+    stroke_fragment_probability: float = 0.7,
+    pressure_variance: float = 0.48,
+    strength_variance: float = 0.45,
+    full_retrace_interval: int = 13,
 ) -> int:
     if repeats < 1:
         raise ValueError("repeats must be at least 1")
@@ -1364,6 +1488,20 @@ def render_sketch_svg(
         raise ValueError("mode must be one of auto, fill, stroke, or outline")
     if stroke_order_distance_weight < 0:
         raise ValueError("stroke_order_distance_weight must be 0 or greater")
+    if not 0 < stroke_fragment_min <= 1:
+        raise ValueError("stroke_fragment_min must be greater than 0 and no more than 1")
+    if not 0 < stroke_fragment_max <= 1:
+        raise ValueError("stroke_fragment_max must be greater than 0 and no more than 1")
+    if stroke_fragment_min > stroke_fragment_max:
+        raise ValueError("stroke_fragment_min must be no greater than stroke_fragment_max")
+    if not 0 < stroke_fragment_probability <= 1:
+        raise ValueError("stroke_fragment_probability must be greater than 0 and no more than 1")
+    if pressure_variance < 0:
+        raise ValueError("pressure_variance must be 0 or greater")
+    if strength_variance < 0:
+        raise ValueError("strength_variance must be 0 or greater")
+    if full_retrace_interval < 0:
+        raise ValueError("full_retrace_interval must be 0 or greater")
 
     register_namespaces()
     tree = ET.parse(input_path)
@@ -1384,6 +1522,12 @@ def render_sketch_svg(
         roughness=roughness,
         keep_original=keep_original,
         stroke_order_distance_weight=stroke_order_distance_weight,
+        stroke_fragment_min=stroke_fragment_min,
+        stroke_fragment_max=stroke_fragment_max,
+        stroke_fragment_probability=stroke_fragment_probability,
+        pressure_variance=pressure_variance,
+        strength_variance=strength_variance,
+        full_retrace_interval=full_retrace_interval,
         rng=random.Random(seed),
     )
 
@@ -1424,6 +1568,12 @@ def parse_args() -> argparse.Namespace:
         default=1.0,
         help="Weight for nearest-endpoint ordering of scanned stroke subpaths; 0 preserves source order",
     )
+    parser.add_argument("--stroke-fragment-min", type=float, default=0.16, help="Shortest retraced stroke fragment as a route fraction")
+    parser.add_argument("--stroke-fragment-max", type=float, default=0.82, help="Longest retraced stroke fragment as a route fraction")
+    parser.add_argument("--stroke-fragment-probability", type=float, default=0.7, help="Chance of drawing each source subpath on fragment passes")
+    parser.add_argument("--pressure-variance", type=float, default=0.48, help="Log-normal pressure variation for retrace width")
+    parser.add_argument("--strength-variance", type=float, default=0.45, help="Opacity variation around each retrace")
+    parser.add_argument("--full-retrace-interval", type=int, default=13, help="Every N passes draw full source strokes; 0 disables scheduled full retraces")
     parser.add_argument(
         "--keep-original",
         action="store_true",
@@ -1451,6 +1601,12 @@ def main() -> None:
             seed=args.seed,
             keep_original=args.keep_original,
             stroke_order_distance_weight=args.stroke_order_distance_weight,
+            stroke_fragment_min=args.stroke_fragment_min,
+            stroke_fragment_max=args.stroke_fragment_max,
+            stroke_fragment_probability=args.stroke_fragment_probability,
+            pressure_variance=args.pressure_variance,
+            strength_variance=args.strength_variance,
+            full_retrace_interval=args.full_retrace_interval,
         )
     except (ET.ParseError, ValueError) as error:
         raise SystemExit(str(error)) from error

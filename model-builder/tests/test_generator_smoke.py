@@ -1,9 +1,11 @@
+import random
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from sketcher_model_builder.generator import (
+    human_stroke_routes_for_pass,
     order_routes_by_nearest_endpoint,
     render_sketch_svg,
     route_axis,
@@ -134,7 +136,7 @@ def test_stroke_routes_can_be_ordered_by_nearest_endpoint() -> None:
         distance_weight=1.0,
     )
 
-    assert ordered == [first, list(reversed(near_reversed)), far]
+    assert ordered == [first, near_reversed, far]
 
     source_ordered = order_routes_by_nearest_endpoint(
         [first, far, near_reversed],
@@ -146,3 +148,23 @@ def test_stroke_routes_can_be_ordered_by_nearest_endpoint() -> None:
 def test_stroke_route_axis_uses_larger_span() -> None:
     assert route_axis([(0.0, 0.0), (0.0, 20.0), (4.0, 22.0)]) == "vertical"
     assert route_axis([(0.0, 0.0), (20.0, 0.0), (22.0, 4.0)]) == "horizontal"
+
+
+def test_stroke_passes_can_draw_mutable_fragments_in_source_direction() -> None:
+    route = [(0.0, 0.0), (20.0, 0.0), (40.0, 0.0), (60.0, 0.0)]
+
+    fragments = human_stroke_routes_for_pass(
+        [route],
+        random.Random(3),
+        1,
+        fragment_min=0.2,
+        fragment_max=0.45,
+        fragment_probability=1.0,
+        full_retrace_interval=0,
+    )
+
+    assert len(fragments) == 1
+    fragment = fragments[0]
+    assert route[0] != fragment[0]
+    assert route[-1] != fragment[-1]
+    assert fragment[0][0] < fragment[-1][0]

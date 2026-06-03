@@ -544,14 +544,32 @@ def cubic_point(
 
 
 def sample_path_outline(d: str, curve_steps: int = 18) -> list[tuple[float, float]]:
+    return [
+        point
+        for subpath in sample_path_subpaths(d, curve_steps=curve_steps)
+        for point in subpath
+    ]
+
+
+def sample_path_subpaths(
+    d: str,
+    curve_steps: int = 18,
+) -> list[list[tuple[float, float]]]:
     tokens = PATH_TOKEN_RE.findall(d)
     x = y = start_x = start_y = 0.0
+    subpaths: list[list[tuple[float, float]]] = []
     points: list[tuple[float, float]] = []
     index = 0
     command = ""
 
     def add(px: float, py: float) -> None:
         points.append((px, py))
+
+    def start_subpath(px: float, py: float) -> None:
+        nonlocal points
+        if points:
+            subpaths.append(points)
+        points = [(px, py)]
 
     while index < len(tokens):
         if not is_number(tokens[index]):
@@ -571,7 +589,9 @@ def sample_path_outline(d: str, curve_steps: int = 18) -> list[tuple[float, floa
                 y = y + py if relative else py
                 if offset == 0:
                     start_x, start_y = x, y
-                add(x, y)
+                    start_subpath(x, y)
+                else:
+                    add(x, y)
         elif upper == "L":
             for offset in range(0, len(values), 2):
                 if offset + 1 >= len(values):
@@ -604,7 +624,9 @@ def sample_path_outline(d: str, curve_steps: int = 18) -> list[tuple[float, floa
             x, y = start_x, start_y
             add(x, y)
 
-    return points
+    if points:
+        subpaths.append(points)
+    return subpaths
 
 
 def centreline_from_outline(
@@ -737,6 +759,10 @@ def smooth_path_from_points(
 
 def stroke_route_from_path_d(d: str) -> list[tuple[float, float]]:
     return sample_path_outline(re.sub(r"[Zz]", "", d), curve_steps=12)
+
+
+def stroke_routes_from_path_d(d: str) -> list[list[tuple[float, float]]]:
+    return sample_path_subpaths(re.sub(r"[Zz]", "", d), curve_steps=12)
 
 
 def bounds_gesture_points(bounds: tuple[float, float, float, float]) -> list[tuple[float, float]]:
@@ -1193,13 +1219,19 @@ def sketch_paths(
             copy.set("id", f"{path.get('id', 'path')}-sketch-{repeat_index + 1}")
             if selected_mode == "stroke":
                 try:
-                    sampled = stroke_route_from_path_d(path.get("d", ""))
+                    sampled_routes = stroke_routes_from_path_d(path.get("d", ""))
                 except ValueError as error:
                     raise SystemExit(
                         f"{path.get('id', 'path')} is a closed outline, not an open stroke route. "
                         "Use open centreline paths for rough sketch mode, or run --mode outline to roughen outlines."
                     ) from error
-                copy.set("d", smooth_path_from_points(sampled, rng, jitter, roughness))
+                copy.set(
+                    "d",
+                    " ".join(
+                        smooth_path_from_points(route, rng, jitter, roughness)
+                        for route in sampled_routes
+                    ),
+                )
             else:
                 sampled = sample_path_outline(path.get("d", ""), curve_steps=10)
                 copy.set("d", smooth_path_from_points(sampled, rng, jitter, roughness))

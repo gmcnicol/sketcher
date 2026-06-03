@@ -31,6 +31,9 @@ MAX_SURVIVOR_CARRYOVERS = 8
 REPEATS_MIN = 100
 REPEATS_MAX = 3000
 REPEATS_MUTATION_DELTA = 3000
+SPLIT_SOURCE_REPEATS_MIN = 4
+SPLIT_SOURCE_REPEATS_MAX = 24
+SPLIT_SOURCE_REPEATS_MUTATION_DELTA = 8
 SHADE_STROKES_MIN = 0
 SHADE_STROKES_MAX = 3000
 SHADE_STROKES_MUTATION_DELTA = 3000
@@ -120,6 +123,7 @@ class SourceContext:
     source_id: str
     source_path: Path
     source_bounds: tuple[float, float, float, float]
+    substroke_count: int
 
 
 @dataclass(frozen=True)
@@ -161,7 +165,11 @@ def create_first_generation(workspace: Path, run_id: str) -> GenerationSummary:
                 break
 
             candidate_id = new_uuid7()
-            genome = build_first_generation_genome(run_id, attempt)
+            genome = build_first_generation_genome(
+                run_id,
+                attempt,
+                source_substroke_count=source_context.substroke_count,
+            )
             artifact_relative_path = candidate_artifact_path(
                 run_id=run_id,
                 generation_id=generation_id,
@@ -285,6 +293,7 @@ def create_next_generation(
                 generation_number=generation_number,
                 slot=slot,
                 parent=survivors[(slot - 1) % len(survivors)],
+                source_substroke_count=source_context.substroke_count,
             ),
         )
         ready_count += mutation_ready_count
@@ -303,6 +312,7 @@ def create_next_generation(
                 run_id=run_id,
                 generation_number=generation_number,
                 slot=slot,
+                source_substroke_count=source_context.substroke_count,
             ),
         )
         ready_count += immigrant_ready_count
@@ -409,6 +419,7 @@ def load_source_context(
 
     try:
         source_bounds = source_svg_bounds(source_path)
+        substroke_count = source_substroke_count(source_path)
     except (ET.ParseError, ValueError) as error:
         raise SourceArtifactError(
             f"Run source artifact is not a renderable SVG: {error}"
@@ -419,6 +430,7 @@ def load_source_context(
         source_id=row["source_id"],
         source_path=source_path,
         source_bounds=source_bounds,
+        substroke_count=substroke_count,
     )
 
 
@@ -510,7 +522,21 @@ def source_svg_bounds(source_path: Path) -> tuple[float, float, float, float]:
     return combine_bounds(path_bounds)
 
 
-def build_first_generation_genome(run_id: str, attempt: int) -> dict[str, Any]:
+def source_substroke_count(source_path: Path) -> int:
+    root = ET.parse(source_path).getroot()
+    return sum(
+        1
+        for element in root.iter()
+        if element.get("data-sketcher-substroke") is not None
+    )
+
+
+def build_first_generation_genome(
+    run_id: str,
+    attempt: int,
+    *,
+    source_substroke_count: int = 0,
+) -> dict[str, Any]:
     presets = [
         (
             "outline_retrace",
@@ -578,6 +604,7 @@ def build_first_generation_genome(run_id: str, attempt: int) -> dict[str, Any]:
     rng = random.Random(seed)
 
     render_parameters = dict(base_parameters)
+    repeats_min, repeats_max, _ = repeat_limits_for_source(source_substroke_count)
     render_parameters.update(
         {
             "seed": seed,
@@ -616,8 +643,8 @@ def build_first_generation_genome(run_id: str, attempt: int) -> dict[str, Any]:
             ),
             "repeats": clamp_int(
                 render_parameters["repeats"] + rng.randint(-4, 5),
-                REPEATS_MIN,
-                REPEATS_MAX,
+                repeats_min,
+                repeats_max,
             ),
             "shade_strokes": clamp_int(
                 render_parameters["shade_strokes"] + rng.randint(-10, 14),
@@ -679,10 +706,12 @@ def build_random_immigrant_genome(
     run_id: str,
     generation_number: int,
     slot: int,
+    source_substroke_count: int = 0,
 ) -> dict[str, Any]:
     genome = build_first_generation_genome(
         f"{run_id}:generation:{generation_number}:random_immigrant",
         slot,
+        source_substroke_count=source_substroke_count,
     )
     seed = lineage_seed(
         run_id=run_id,
@@ -712,6 +741,7 @@ def build_survivor_mutation_genome(
     generation_number: int,
     slot: int,
     parent: ParentCandidate,
+    source_substroke_count: int = 0,
 ) -> dict[str, Any]:
     seed = lineage_seed(
         run_id=run_id,
@@ -722,7 +752,11 @@ def build_survivor_mutation_genome(
     )
     rng = random.Random(seed)
     parent_parameters = dict(parent.genome.get("renderParameters", {}))
-    render_parameters = mutate_render_parameters(parent_parameters, rng)
+    render_parameters = mutate_render_parameters(
+        parent_parameters,
+        rng,
+        source_substroke_count=source_substroke_count,
+    )
     render_parameters.update(
         {
             "seed": seed,
@@ -778,15 +812,20 @@ def build_survivor_carryover_genome(
 def mutate_render_parameters(
     parent_parameters: dict[str, Any],
     rng: random.Random,
+    *,
+    source_substroke_count: int = 0,
 ) -> dict[str, Any]:
+    repeats_min, repeats_max, repeats_delta = repeat_limits_for_source(
+        source_substroke_count
+    )
     render_parameters = {
         "mode": parent_parameters.get("mode", "auto"),
         "repeats": mutate_int_parameter(
             parent_parameters.get("repeats", 24),
             rng,
-            minimum=REPEATS_MIN,
-            maximum=REPEATS_MAX,
-            delta=REPEATS_MUTATION_DELTA,
+            minimum=repeats_min,
+            maximum=repeats_max,
+            delta=repeats_delta,
         ),
         "shade_strokes": mutate_int_parameter(
             parent_parameters.get("shade_strokes", 24),
@@ -892,6 +931,16 @@ def mutate_render_parameters(
     if render_parameters["stroke_fragment_min"] > render_parameters["stroke_fragment_max"]:
         render_parameters["stroke_fragment_min"] = render_parameters["stroke_fragment_max"]
     return humanize_dense_strokes(render_parameters)
+
+
+def repeat_limits_for_source(source_substroke_count: int) -> tuple[int, int, int]:
+    if source_substroke_count > 0:
+        return (
+            SPLIT_SOURCE_REPEATS_MIN,
+            SPLIT_SOURCE_REPEATS_MAX,
+            SPLIT_SOURCE_REPEATS_MUTATION_DELTA,
+        )
+    return REPEATS_MIN, REPEATS_MAX, REPEATS_MUTATION_DELTA
 
 
 def humanize_dense_strokes(render_parameters: dict[str, Any]) -> dict[str, Any]:

@@ -550,6 +550,18 @@ def cubic_point(
     return x, y
 
 
+def quadratic_point(
+    p0: tuple[float, float],
+    p1: tuple[float, float],
+    p2: tuple[float, float],
+    t: float,
+) -> tuple[float, float]:
+    mt = 1 - t
+    x = mt**2 * p0[0] + 2 * mt * t * p1[0] + t**2 * p2[0]
+    y = mt**2 * p0[1] + 2 * mt * t * p1[1] + t**2 * p2[1]
+    return x, y
+
+
 def sample_path_outline(d: str, curve_steps: int = 18) -> list[tuple[float, float]]:
     return [
         point
@@ -627,6 +639,17 @@ def sample_path_subpaths(
                 for step in range(1, curve_steps + 1):
                     add(*cubic_point(p0, p1, p2, p3, step / curve_steps))
                 x, y = p3
+        elif upper == "Q":
+            for offset in range(0, len(values), 4):
+                if offset + 3 >= len(values):
+                    break
+                p0 = (x, y)
+                coords = values[offset : offset + 4]
+                p1 = (x + coords[0], y + coords[1]) if relative else (coords[0], coords[1])
+                p2 = (x + coords[2], y + coords[3]) if relative else (coords[2], coords[3])
+                for step in range(1, curve_steps + 1):
+                    add(*quadratic_point(p0, p1, p2, step / curve_steps))
+                x, y = p2
         elif upper == "Z":
             x, y = start_x, start_y
             add(x, y)

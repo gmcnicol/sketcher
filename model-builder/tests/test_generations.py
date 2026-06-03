@@ -19,6 +19,12 @@ VALID_SOURCE_SVG = b"""\
 """
 
 EMPTY_SOURCE_SVG = b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"></svg>'
+LONG_TRACED_STROKE_SVG = b"""\
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 40">
+  <path id="trace" style="fill:none;stroke:#000;stroke-width:1"
+    d="M 0 20 C 20 0 40 40 60 20 C 80 0 100 40 120 20 C 140 0 160 40 180 20 C 195 10 205 30 220 20" />
+</svg>
+"""
 
 
 def upload_source(client: TestClient, svg: bytes = VALID_SOURCE_SVG) -> dict:
@@ -123,6 +129,28 @@ def test_generation_endpoint_creates_first_generation_with_24_ready_candidates(
         assert isinstance(genome["seed"], int)
         assert genome["renderParameters"]["seed"] == genome["seed"]
         assert genome["renderParameters"]["repeats"] >= generations.REPEATS_MIN
+
+
+def test_split_source_first_generation_uses_lower_retrace_counts(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    install_fast_renderer(monkeypatch)
+    workspace = tmp_path / "workspace"
+    client = TestClient(create_app(workspace))
+    upload = upload_source(client, LONG_TRACED_STROKE_SVG)
+    run_id = upload["run"]["id"]
+
+    response = client.post(f"/runs/{run_id}/generations")
+
+    assert response.status_code == 201
+    rows = fetch_rows(workspace, "candidates")
+    repeats = [
+        json.loads(row["genome_json"])["renderParameters"]["repeats"]
+        for row in rows
+    ]
+    assert min(repeats) >= generations.SPLIT_SOURCE_REPEATS_MIN
+    assert max(repeats) <= generations.SPLIT_SOURCE_REPEATS_MAX
 
 
 def test_duplicate_generation_creation_returns_conflict_without_extra_candidates(
@@ -246,6 +274,19 @@ def test_survivor_stroke_count_mutations_can_reach_thousands() -> None:
     assert repeat_mutation["repeats"] <= generations.REPEATS_MAX
     assert shade_mutation["shade_strokes"] > 1000
     assert shade_mutation["shade_strokes"] <= generations.SHADE_STROKES_MAX
+
+
+def test_split_source_repeat_mutations_stay_low() -> None:
+    parent_parameters = {"repeats": 12, "shade_strokes": 58}
+
+    mutation = generations.mutate_render_parameters(
+        parent_parameters,
+        random.Random(5),
+        source_substroke_count=24,
+    )
+
+    assert generations.SPLIT_SOURCE_REPEATS_MIN <= mutation["repeats"]
+    assert mutation["repeats"] <= generations.SPLIT_SOURCE_REPEATS_MAX
 
 
 def test_dense_survivor_strokes_stay_visible_and_more_human() -> None:

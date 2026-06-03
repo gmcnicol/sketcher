@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import math
-import random
 import xml.etree.ElementTree as ET
 from copy import deepcopy
 from pathlib import Path
@@ -11,11 +10,11 @@ from sketcher_model_builder.generator import (
     SVG_NS,
     clean_svg_tree_for_export,
     dict_to_style,
+    fmt_number,
     local_name,
     register_namespaces,
     route_length,
     sample_path_subpaths,
-    smooth_path_from_points,
     style_to_dict,
     style_value,
 )
@@ -115,6 +114,33 @@ def split_path_routes(
     return strokes
 
 
+def quadratic_path_from_points(points: list[tuple[float, float]]) -> str:
+    if len(points) < 2:
+        raise ValueError("sub-stroke must contain at least two points")
+
+    parts = ["M", fmt_number(points[0][0]), fmt_number(points[0][1])]
+    index = 1
+    while index + 1 < len(points):
+        control = points[index]
+        end = points[index + 1]
+        parts.extend(
+            [
+                "Q",
+                fmt_number(control[0]),
+                fmt_number(control[1]),
+                fmt_number(end[0]),
+                fmt_number(end[1]),
+            ]
+        )
+        index += 2
+
+    if index < len(points):
+        end = points[index]
+        parts.extend(["L", fmt_number(end[0]), fmt_number(end[1])])
+
+    return " ".join(parts)
+
+
 def stroke_style_for_split(source: ET.Element) -> str:
     style = style_to_dict(source.get("style"))
     style["fill"] = "none"
@@ -195,7 +221,6 @@ def split_trace_tree(
 
     replaced_count = 0
     split_count = 0
-    rng = random.Random(0)
 
     for path in paths:
         parent = parent_map.get(path)
@@ -232,7 +257,7 @@ def split_trace_tree(
             split_path.attrib.update(deepcopy(template_attrib))
             split_path.set("id", f"{base_id}-substroke-{stroke_index:04d}")
             split_path.set("style", style)
-            split_path.set("d", smooth_path_from_points(points, rng, jitter=0, roughness=0))
+            split_path.set("d", quadratic_path_from_points(points))
             split_path.set("data-sketcher-substroke", str(stroke_index))
             parent.insert(index + stroke_index - 1, split_path)
 

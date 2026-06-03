@@ -146,6 +146,7 @@ def test_svg_upload_splits_long_traced_strokes_before_storing_source(
 
     assert len(substrokes) > 1
     assert all(element.get("d", "").startswith("M ") for element in substrokes)
+    assert all(" Q " in element.get("d", "") for element in substrokes)
     assert source["byteSize"] == len(artifact_bytes)
     assert source["sha256"] == hashlib.sha256(artifact_bytes).hexdigest()
 

@@ -19,3 +19,5 @@ This is a multi-context repo: a Node.js web app and a Python/uv model builder. S
 ### Local server URLs
 
 When giving the user local development URLs, use the hostname `nuc` instead of `localhost` or `127.0.0.1`.
+
+Launch the app with Docker Compose. Expose the UI only; keep the model-builder API internal to the Compose network and access it through the webapp proxy.

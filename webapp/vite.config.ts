@@ -9,5 +9,12 @@ export default defineConfig({
     port: 5173,
     strictPort: true,
     allowedHosts: ['nuc'],
+    proxy: {
+      '/api': {
+        target: 'http://api:8000',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api/, ''),
+      },
+    },
   },
 })

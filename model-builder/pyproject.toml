@@ -4,7 +4,10 @@ version = "0.1.0"
 description = "Sketcher model builder and SVG sketch generation tools."
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+    "fastapi[standard]>=0.136.3",
+    "uuid-utils>=0.16.0",
+]
 
 [project.scripts]
 sketch = "sketcher_model_builder.generator:main"

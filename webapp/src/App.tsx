@@ -1,5 +1,5 @@
 import type { FormEvent } from 'react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 
 type UploadSource = {
@@ -72,7 +72,7 @@ type ReviewDecision = 'survived' | 'rejected'
 type NextGenerationMode = 'breed' | 'reroll'
 
 const apiBaseUrl =
-  import.meta.env.VITE_MODEL_BUILDER_URL ?? 'http://localhost:8000'
+  import.meta.env.VITE_MODEL_BUILDER_URL ?? '/api'
 
 function App() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
@@ -85,6 +85,11 @@ function App() {
   const [isUploading, setIsUploading] = useState(false)
   const [isGenerating, setIsGenerating] = useState(false)
   const [isReviewing, setIsReviewing] = useState(false)
+  const [loadedCandidateImageId, setLoadedCandidateImageId] = useState<string | null>(
+    null,
+  )
+  const generationActionInFlightRef = useRef(false)
+  const reviewActionInFlightRef = useRef(false)
 
   const selectedFileLabel = useMemo(() => {
     if (!selectedFile) {
@@ -93,6 +98,9 @@ function App() {
 
     return `${selectedFile.name} (${formatByteSize(selectedFile.size)})`
   }, [selectedFile])
+  const currentCandidate = review?.currentCandidate ?? null
+  const candidateImageLoaded =
+    currentCandidate !== null && loadedCandidateImageId === currentCandidate.id
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -139,10 +147,11 @@ function App() {
   }
 
   async function handleGenerateCandidates() {
-    if (!result) {
+    if (generationActionInFlightRef.current || !result) {
       return
     }
 
+    generationActionInFlightRef.current = true
     setIsGenerating(true)
     setGenerationError(null)
 
@@ -170,6 +179,7 @@ function App() {
       )
     } finally {
       setIsGenerating(false)
+      generationActionInFlightRef.current = false
     }
   }
 
@@ -186,10 +196,18 @@ function App() {
 
   const submitReviewDecision = useCallback(
     async (decision: ReviewDecision) => {
-      if (isReviewing || !result || !review?.currentCandidate || review.complete) {
+      if (
+        reviewActionInFlightRef.current ||
+        isReviewing ||
+        !candidateImageLoaded ||
+        !result ||
+        !review?.currentCandidate ||
+        review.complete
+      ) {
         return
       }
 
+      reviewActionInFlightRef.current = true
       setIsReviewing(true)
       setReviewError(null)
 
@@ -220,16 +238,24 @@ function App() {
         )
       } finally {
         setIsReviewing(false)
+        reviewActionInFlightRef.current = false
       }
     },
-    [isReviewing, result, review],
+    [candidateImageLoaded, isReviewing, result, review],
   )
 
   const undoReviewDecision = useCallback(async () => {
-    if (isReviewing || !result || !review || review.reviewedCount === 0) {
+    if (
+      reviewActionInFlightRef.current ||
+      isReviewing ||
+      !result ||
+      !review ||
+      review.reviewedCount === 0
+    ) {
       return
     }
 
+    reviewActionInFlightRef.current = true
     setIsReviewing(true)
     setReviewError(null)
 
@@ -251,15 +277,22 @@ function App() {
       )
     } finally {
       setIsReviewing(false)
+      reviewActionInFlightRef.current = false
     }
   }, [isReviewing, result, review])
 
   const createNextGeneration = useCallback(
     async (mode: NextGenerationMode) => {
-      if (isGenerating || !result || !review?.complete) {
+      if (
+        generationActionInFlightRef.current ||
+        isGenerating ||
+        !result ||
+        !review?.complete
+      ) {
         return
       }
 
+      generationActionInFlightRef.current = true
       setIsGenerating(true)
       setReviewError(null)
       setGenerationError(null)
@@ -290,6 +323,7 @@ function App() {
         )
       } finally {
         setIsGenerating(false)
+        generationActionInFlightRef.current = false
       }
     },
     [fetchReview, isGenerating, result, review],
@@ -324,8 +358,6 @@ function App() {
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [createNextGeneration, review, submitReviewDecision, undoReviewDecision])
-
-  const currentCandidate = review?.currentCandidate ?? null
 
   return (
     <main className="app-shell">
@@ -416,11 +448,16 @@ function App() {
             candidate={currentCandidate}
             isReviewing={isReviewing}
             isGenerating={isGenerating}
+            candidateImageLoaded={candidateImageLoaded}
             reviewError={reviewError}
             onSurvive={() => void submitReviewDecision('survived')}
             onReject={() => void submitReviewDecision('rejected')}
             onUndo={() => void undoReviewDecision()}
             onNextGeneration={(mode) => void createNextGeneration(mode)}
+            onCandidateImageLoad={(candidateId) =>
+              setLoadedCandidateImageId(candidateId)
+            }
+            onCandidateImageError={() => setLoadedCandidateImageId(null)}
           />
         ) : null}
       </section>
@@ -434,11 +471,14 @@ type ReviewDeckProps = {
   candidate: CandidateSummary | null
   isReviewing: boolean
   isGenerating: boolean
+  candidateImageLoaded: boolean
   reviewError: string | null
   onSurvive: () => void
   onReject: () => void
   onUndo: () => void
   onNextGeneration: (mode: NextGenerationMode) => void
+  onCandidateImageLoad: (candidateId: string) => void
+  onCandidateImageError: () => void
 }
 
 function ReviewDeck({
@@ -447,11 +487,14 @@ function ReviewDeck({
   candidate,
   isReviewing,
   isGenerating,
+  candidateImageLoaded,
   reviewError,
   onSurvive,
   onReject,
   onUndo,
   onNextGeneration,
+  onCandidateImageLoad,
+  onCandidateImageError,
 }: ReviewDeckProps) {
   if (!review) {
     return (
@@ -535,6 +578,8 @@ function ReviewDeck({
     )
   }
 
+  const reviewActionsDisabled = isReviewing || !candidateImageLoaded
+
   return (
     <section className="review-deck" aria-label="Review candidates">
       <div className="review-header">
@@ -555,6 +600,8 @@ function ReviewDeck({
           key={candidate.id}
           src={`${apiBaseUrl}/candidates/${encodeURIComponent(candidate.id)}/artifact`}
           alt={`Candidate ${review.currentIndex} artifact`}
+          onLoad={() => onCandidateImageLoad(candidate.id)}
+          onError={onCandidateImageError}
         />
       </div>
 
@@ -574,14 +621,14 @@ function ReviewDeck({
       </div>
 
       <div className="review-actions" aria-label="Review actions">
-        <button type="button" onClick={onSurvive} disabled={isReviewing}>
+        <button type="button" onClick={onSurvive} disabled={reviewActionsDisabled}>
           Survive (j)
         </button>
         <button
           className="reject-action"
           type="button"
           onClick={onReject}
-          disabled={isReviewing}
+          disabled={reviewActionsDisabled}
         >
           Reject (k)
         </button>

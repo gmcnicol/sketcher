@@ -14,7 +14,7 @@ from pathlib import Path
 import uuid_utils
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 ALLOWED_SVG_CONTENT_TYPES = {"image/svg+xml"}
 
 
@@ -142,6 +142,28 @@ def ensure_workspace(workspace: Path) -> Path:
             """
             CREATE INDEX IF NOT EXISTS idx_candidates_generation
             ON candidates (generation_id, position)
+            """
+        )
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS candidate_decisions (
+                id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                generation_id TEXT NOT NULL,
+                candidate_id TEXT NOT NULL,
+                decision TEXT NOT NULL CHECK (decision IN ('survived', 'rejected')),
+                created_at TEXT NOT NULL,
+                undone_at TEXT,
+                FOREIGN KEY (run_id) REFERENCES runs(id),
+                FOREIGN KEY (generation_id) REFERENCES generations(id),
+                FOREIGN KEY (candidate_id) REFERENCES candidates(id)
+            )
+            """
+        )
+        db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_candidate_decisions_generation_active
+            ON candidate_decisions (generation_id, candidate_id, undone_at, created_at)
             """
         )
         db.execute(

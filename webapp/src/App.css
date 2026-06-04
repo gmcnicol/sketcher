@@ -126,6 +126,41 @@ button:focus-visible {
   display: grid;
 }
 
+.run-strip {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.run-strip-item {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.run-strip-item span,
+.generation-progress-metric span {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.run-strip-item strong {
+  min-width: 0;
+  color: var(--text-h);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .status-success div,
 .status-generation div {
   display: grid;
@@ -151,6 +186,95 @@ button:focus-visible {
   min-height: 44px;
   padding: 0 18px;
   font-size: 14px;
+}
+
+.generation-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.generation-progress-warning {
+  border-color: #d7a100;
+  background: #fff8df;
+}
+
+.generation-progress-header {
+  display: flex;
+  gap: 16px;
+  align-items: start;
+  justify-content: space-between;
+}
+
+.generation-progress-header h2 {
+  margin: 4px 0 0;
+  color: var(--text-h);
+  font-size: 22px;
+  line-height: 1.15;
+  letter-spacing: 0;
+}
+
+.generation-progress-status {
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-h);
+  background: var(--bg);
+  font-size: 13px;
+  font-weight: 700;
+  text-transform: capitalize;
+  white-space: nowrap;
+}
+
+.generation-progress-track {
+  position: relative;
+  height: 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--code-bg);
+}
+
+.generation-progress-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+}
+
+.generation-progress-track-indeterminate .generation-progress-fill {
+  position: absolute;
+  animation: progress-indeterminate 1.2s ease-in-out infinite;
+}
+
+.generation-progress-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.generation-progress-metric {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.generation-progress-metric strong {
+  min-height: 22px;
+  color: var(--text-h);
+  font-size: 15px;
+  line-height: 1.35;
+  white-space: nowrap;
 }
 
 .status-generation {
@@ -280,11 +404,40 @@ button:focus-visible {
   background: var(--surface);
 }
 
-.debug-panel summary {
+.debug-panel summary,
+.debug-summary {
   padding: 14px 16px;
   color: var(--text-h);
   font-weight: 700;
   cursor: pointer;
+}
+
+.debug-summary {
+  width: 100%;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-h);
+  font: 700 15px/1.2 var(--sans);
+  text-align: left;
+}
+
+.debug-summary::after {
+  content: '+';
+  color: var(--text-muted);
+  font: 700 18px/1 var(--sans);
+}
+
+.debug-summary[aria-expanded='true']::after {
+  content: '-';
+}
+
+.debug-panel-content {
+  overflow: hidden;
 }
 
 .debug-panel div {
@@ -330,6 +483,29 @@ button:focus-visible {
   color: var(--text-h);
 }
 
+@keyframes progress-indeterminate {
+  0% {
+    transform: translateX(-120%);
+  }
+
+  100% {
+    transform: translateX(260%);
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  .generation-progress-warning {
+    border-color: #8a6a16;
+    background: #2b2411;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .generation-progress-track-indeterminate .generation-progress-fill {
+    animation: none;
+  }
+}
+
 @media (max-width: 620px) {
   .app-shell {
     place-items: start stretch;
@@ -338,6 +514,16 @@ button:focus-visible {
 
   .upload-form {
     grid-template-columns: 1fr;
+  }
+
+  .run-strip {
+    grid-template-columns: 1fr;
+    align-items: start;
+  }
+
+  .generation-progress-header {
+    align-items: start;
+    flex-direction: column;
   }
 
   button {
@@ -357,6 +543,10 @@ button:focus-visible {
 
   .review-counts {
     justify-content: flex-start;
+  }
+
+  .generation-progress-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .candidate-stage {

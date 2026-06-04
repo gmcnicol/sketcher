@@ -1,5 +1,6 @@
 import type { FormEvent } from 'react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
 import './App.css'
 
 type UploadSource = {
@@ -70,11 +71,15 @@ type ReviewResponse = {
 
 type ReviewDecision = 'survived' | 'rejected'
 type NextGenerationMode = 'breed' | 'reroll'
+type TerminalGenerationStatus = 'ready' | 'partial_failed'
 
 const apiBaseUrl =
   import.meta.env.VITE_MODEL_BUILDER_URL ?? '/api'
+const generationReadyTarget = 24
+const generationPollIntervalMs = 1000
 
 function App() {
+  const prefersReducedMotion = useReducedMotion()
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [result, setResult] = useState<UploadResponse | null>(null)
   const [generation, setGeneration] = useState<GenerationSummary | null>(null)
@@ -85,10 +90,21 @@ function App() {
   const [isUploading, setIsUploading] = useState(false)
   const [isGenerating, setIsGenerating] = useState(false)
   const [isReviewing, setIsReviewing] = useState(false)
+  const [generationRequestInFlight, setGenerationRequestInFlight] =
+    useState(false)
+  const [generationStartedAt, setGenerationStartedAt] = useState<number | null>(
+    null,
+  )
+  const [lastProgressAt, setLastProgressAt] = useState<number | null>(null)
+  const [generationActionLabel, setGenerationActionLabel] = useState(
+    'Generating candidates',
+  )
   const [loadedCandidateImageId, setLoadedCandidateImageId] = useState<string | null>(
     null,
   )
   const generationActionInFlightRef = useRef(false)
+  const generationRequestBaselineRef = useRef(0)
+  const reviewedTerminalGenerationRef = useRef<string | null>(null)
   const reviewActionInFlightRef = useRef(false)
 
   const selectedFileLabel = useMemo(() => {
@@ -101,6 +117,68 @@ function App() {
   const currentCandidate = review?.currentCandidate ?? null
   const candidateImageLoaded =
     currentCandidate !== null && loadedCandidateImageId === currentCandidate.id
+  const generationIsReviewable =
+    generation !== null &&
+    isTerminalGenerationStatus(generation.status) &&
+    generation.readyCount > 0 &&
+    !generationRequestInFlight
+
+  const fetchReview = useCallback(async (runId: string) => {
+    const response = await fetch(`${apiBaseUrl}/runs/${runId}/review/current`)
+    const body = await response.json().catch(() => null)
+
+    if (!response.ok) {
+      throw new Error(body?.detail ?? 'Review state failed to load.')
+    }
+
+    setReview((body as ReviewResponse).review)
+  }, [])
+
+  const startGenerationProgress = useCallback(
+    (actionLabel: string) => {
+      generationRequestBaselineRef.current = generation?.generationNumber ?? 0
+      reviewedTerminalGenerationRef.current = null
+      setGenerationActionLabel(actionLabel)
+      setGenerationStartedAt(Date.now())
+      setLastProgressAt(null)
+      setGenerationRequestInFlight(true)
+    },
+    [generation],
+  )
+
+  const handleGenerationUpdate = useCallback(
+    async (nextGeneration: GenerationSummary) => {
+      if (
+        generationRequestInFlight &&
+        nextGeneration.generationNumber <= generationRequestBaselineRef.current
+      ) {
+        return
+      }
+
+      if (nextGeneration.id !== generation?.id) {
+        setReview(null)
+        setLoadedCandidateImageId(null)
+      }
+
+      setGeneration(nextGeneration)
+      setLastProgressAt(Date.now())
+
+      if (!isTerminalGenerationStatus(nextGeneration.status)) {
+        return
+      }
+
+      setGenerationRequestInFlight(false)
+
+      if (
+        nextGeneration.readyCount > 0 &&
+        reviewedTerminalGenerationRef.current !== nextGeneration.id
+      ) {
+        reviewedTerminalGenerationRef.current = nextGeneration.id
+        await fetchReview(result?.run.id ?? nextGeneration.runId)
+      }
+    },
+    [fetchReview, generation?.id, generationRequestInFlight, result],
+  )
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -109,6 +187,9 @@ function App() {
       setResult(null)
       setGeneration(null)
       setReview(null)
+      setGenerationRequestInFlight(false)
+      setGenerationStartedAt(null)
+      setLastProgressAt(null)
       return
     }
 
@@ -120,6 +201,9 @@ function App() {
     setResult(null)
     setGeneration(null)
     setReview(null)
+    setGenerationRequestInFlight(false)
+    setGenerationStartedAt(null)
+    setLastProgressAt(null)
     setGenerationError(null)
     setReviewError(null)
 
@@ -154,6 +238,7 @@ function App() {
     generationActionInFlightRef.current = true
     setIsGenerating(true)
     setGenerationError(null)
+    startGenerationProgress('Generating candidates')
 
     try {
       const response = await fetch(
@@ -169,9 +254,9 @@ function App() {
       }
 
       const generationBody = body as GenerationResponse
-      setGeneration(generationBody.generation)
-      await fetchReview(result.run.id)
+      await handleGenerationUpdate(generationBody.generation)
     } catch (generateError) {
+      setGenerationRequestInFlight(false)
       setGenerationError(
         generateError instanceof Error
           ? generateError.message
@@ -182,17 +267,6 @@ function App() {
       generationActionInFlightRef.current = false
     }
   }
-
-  const fetchReview = useCallback(async (runId: string) => {
-    const response = await fetch(`${apiBaseUrl}/runs/${runId}/review/current`)
-    const body = await response.json().catch(() => null)
-
-    if (!response.ok) {
-      throw new Error(body?.detail ?? 'Review state failed to load.')
-    }
-
-    setReview((body as ReviewResponse).review)
-  }, [])
 
   const submitReviewDecision = useCallback(
     async (decision: ReviewDecision) => {
@@ -296,6 +370,9 @@ function App() {
       setIsGenerating(true)
       setReviewError(null)
       setGenerationError(null)
+      startGenerationProgress(
+        mode === 'breed' ? 'Breeding next generation' : 'Rerolling generation',
+      )
 
       try {
         const response = await fetch(
@@ -313,9 +390,9 @@ function App() {
         }
 
         const generationBody = body as GenerationResponse
-        setGeneration(generationBody.generation)
-        await fetchReview(result.run.id)
+        await handleGenerationUpdate(generationBody.generation)
       } catch (nextGenerationError) {
+        setGenerationRequestInFlight(false)
         setReviewError(
           nextGenerationError instanceof Error
             ? nextGenerationError.message
@@ -326,8 +403,84 @@ function App() {
         generationActionInFlightRef.current = false
       }
     },
-    [fetchReview, isGenerating, result, review],
+    [
+      handleGenerationUpdate,
+      isGenerating,
+      result,
+      review,
+      startGenerationProgress,
+    ],
   )
+
+  useEffect(() => {
+    const runId = result?.run.id
+    const shouldPoll =
+      runId !== undefined &&
+      (generationRequestInFlight || generation?.status === 'running')
+
+    if (!shouldPoll) {
+      return
+    }
+
+    let cancelled = false
+    let requestInProgress = false
+
+    async function pollCurrentGeneration() {
+      if (!runId || requestInProgress) {
+        return
+      }
+
+      requestInProgress = true
+      try {
+        const response = await fetch(
+          `${apiBaseUrl}/runs/${runId}/generations/current`,
+        )
+        const body = await response.json().catch(() => null)
+
+        if (cancelled) {
+          return
+        }
+
+        if (response.status === 404 && generationRequestInFlight) {
+          return
+        }
+
+        if (!response.ok) {
+          throw new Error(body?.detail ?? 'Generation progress failed to load.')
+        }
+
+        await handleGenerationUpdate((body as GenerationResponse).generation)
+      } catch (progressError) {
+        if (cancelled) {
+          return
+        }
+
+        setGenerationError(
+          progressError instanceof Error
+            ? progressError.message
+            : 'Generation progress failed unexpectedly.',
+        )
+      } finally {
+        requestInProgress = false
+      }
+    }
+
+    void pollCurrentGeneration()
+    const interval = window.setInterval(
+      () => void pollCurrentGeneration(),
+      generationPollIntervalMs,
+    )
+
+    return () => {
+      cancelled = true
+      window.clearInterval(interval)
+    }
+  }, [
+    generation?.status,
+    generationRequestInFlight,
+    handleGenerationUpdate,
+    result?.run.id,
+  ])
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -380,6 +533,9 @@ function App() {
                 setResult(null)
                 setGeneration(null)
                 setReview(null)
+                setGenerationRequestInFlight(false)
+                setGenerationStartedAt(null)
+                setLastProgressAt(null)
                 setGenerationError(null)
                 setReviewError(null)
               }}
@@ -400,28 +556,18 @@ function App() {
 
         {result ? (
           <>
-            <section className="status status-success" aria-label="Upload result">
-              <div>
-                <span>Source ID</span>
-                <code>{result.source.id}</code>
+            <section className="run-strip" aria-label="Upload result">
+              <div className="run-strip-item">
+                <span>Source</span>
+                <strong>{result.source.filename}</strong>
               </div>
-              <div>
-                <span>Run ID</span>
-                <code>{result.run.id}</code>
-              </div>
-              <div>
-                <span>Status</span>
-                <code>{result.run.status}</code>
-              </div>
-              <div>
-                <span>SHA-256</span>
-                <code>{result.source.sha256}</code>
-              </div>
-              <div>
-                <span>Stored path</span>
-                <code>{result.source.artifactPath}</code>
+              <div className="run-strip-item">
+                <span>Run</span>
+                <code>{shortId(result.run.id)}</code>
               </div>
             </section>
+
+            <RunDebugDisclosure result={result} />
 
             <button
               className="generation-action"
@@ -441,25 +587,54 @@ function App() {
           </div>
         ) : null}
 
-        {generation ? (
-          <ReviewDeck
-            generation={generation}
-            review={review}
-            candidate={currentCandidate}
-            isReviewing={isReviewing}
-            isGenerating={isGenerating}
-            candidateImageLoaded={candidateImageLoaded}
-            reviewError={reviewError}
-            onSurvive={() => void submitReviewDecision('survived')}
-            onReject={() => void submitReviewDecision('rejected')}
-            onUndo={() => void undoReviewDecision()}
-            onNextGeneration={(mode) => void createNextGeneration(mode)}
-            onCandidateImageLoad={(candidateId) =>
-              setLoadedCandidateImageId(candidateId)
-            }
-            onCandidateImageError={() => setLoadedCandidateImageId(null)}
-          />
-        ) : null}
+        <AnimatePresence>
+          {generationRequestInFlight || generation ? (
+            <GenerationProgress
+              key="generation-progress"
+              actionLabel={generationActionLabel}
+              generation={generation}
+              isInFlight={generationRequestInFlight}
+              startedAt={generationStartedAt}
+              lastProgressAt={lastProgressAt}
+            />
+          ) : null}
+        </AnimatePresence>
+
+        <AnimatePresence mode="wait">
+          {generationIsReviewable && generation ? (
+            <motion.div
+              key={generation.id}
+              initial={
+                prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 10 }
+              }
+              animate={
+                prefersReducedMotion ? { opacity: 1 } : { opacity: 1, y: 0 }
+              }
+              exit={
+                prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 6 }
+              }
+              transition={{ duration: 0.18 }}
+            >
+              <ReviewDeck
+                generation={generation}
+                review={review}
+                candidate={currentCandidate}
+                isReviewing={isReviewing}
+                isGenerating={isGenerating}
+                candidateImageLoaded={candidateImageLoaded}
+                reviewError={reviewError}
+                onSurvive={() => void submitReviewDecision('survived')}
+                onReject={() => void submitReviewDecision('rejected')}
+                onUndo={() => void undoReviewDecision()}
+                onNextGeneration={(mode) => void createNextGeneration(mode)}
+                onCandidateImageLoad={(candidateId) =>
+                  setLoadedCandidateImageId(candidateId)
+                }
+                onCandidateImageError={() => setLoadedCandidateImageId(null)}
+              />
+            </motion.div>
+          ) : null}
+        </AnimatePresence>
       </section>
     </main>
   )
@@ -479,6 +654,210 @@ type ReviewDeckProps = {
   onNextGeneration: (mode: NextGenerationMode) => void
   onCandidateImageLoad: (candidateId: string) => void
   onCandidateImageError: () => void
+}
+
+type GenerationProgressProps = {
+  actionLabel: string
+  generation: GenerationSummary | null
+  isInFlight: boolean
+  startedAt: number | null
+  lastProgressAt: number | null
+}
+
+function GenerationProgress({
+  actionLabel,
+  generation,
+  isInFlight,
+  startedAt,
+  lastProgressAt,
+}: GenerationProgressProps) {
+  const prefersReducedMotion = useReducedMotion()
+  const [now, setNow] = useState(() => Date.now())
+  const activeGeneration =
+    generation && (!isInFlight || generation.status === 'running')
+      ? generation
+      : null
+  const status = activeGeneration?.status ?? 'starting'
+  const readyCount = activeGeneration?.readyCount ?? 0
+  const failedCount = activeGeneration?.failedCount ?? 0
+  const totalCandidateCount = activeGeneration?.totalCandidateCount ?? 0
+  const readyPercent = Math.min(
+    (readyCount / generationReadyTarget) * 100,
+    100,
+  )
+  const isStarting = activeGeneration === null
+  const isWarning = status === 'partial_failed'
+
+  useEffect(() => {
+    const interval = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(interval)
+  }, [])
+
+  return (
+    <motion.section
+      className={`generation-progress${
+        isWarning ? ' generation-progress-warning' : ''
+      }`}
+      aria-label="Generation progress"
+      initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 8 }}
+      animate={prefersReducedMotion ? { opacity: 1 } : { opacity: 1, y: 0 }}
+      exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 6 }}
+      transition={{ duration: 0.18 }}
+    >
+      <div className="generation-progress-header">
+        <div>
+          <p className="eyebrow">{actionLabel}</p>
+          <h2>
+            {activeGeneration
+              ? `Generation ${activeGeneration.generationNumber}`
+              : 'Starting generation'}
+          </h2>
+        </div>
+        <span className="generation-progress-status">
+          {formatStatus(status)}
+        </span>
+      </div>
+
+      <div
+        className={`generation-progress-track${
+          isStarting ? ' generation-progress-track-indeterminate' : ''
+        }`}
+        aria-label={`${readyCount} ready candidates out of ${generationReadyTarget}`}
+      >
+        <motion.div
+          className="generation-progress-fill"
+          style={{ width: isStarting ? '44%' : `${readyPercent}%` }}
+          transition={{ duration: prefersReducedMotion ? 0 : 0.2 }}
+        />
+      </div>
+
+      <div className="generation-progress-grid">
+        <AnimatedMetric
+          label="Ready"
+          value={`${readyCount} / ${generationReadyTarget}`}
+        />
+        <AnimatedMetric label="Failed" value={failedCount.toString()} />
+        <AnimatedMetric
+          label="Attempts"
+          value={totalCandidateCount.toString()}
+        />
+        <AnimatedMetric
+          label="Elapsed"
+          value={startedAt ? formatDuration(now - startedAt) : '0s'}
+        />
+        <AnimatedMetric
+          label="Updated"
+          value={lastProgressAt ? `${formatDuration(now - lastProgressAt)} ago` : 'waiting'}
+        />
+      </div>
+    </motion.section>
+  )
+}
+
+type AnimatedMetricProps = {
+  label: string
+  value: string
+}
+
+function AnimatedMetric({ label, value }: AnimatedMetricProps) {
+  const prefersReducedMotion = useReducedMotion()
+
+  return (
+    <div className="generation-progress-metric">
+      <span>{label}</span>
+      <AnimatePresence mode="popLayout" initial={false}>
+        <motion.strong
+          key={value}
+          initial={
+            prefersReducedMotion
+              ? { opacity: 0 }
+              : { opacity: 0, y: -3, scale: 0.98 }
+          }
+          animate={
+            prefersReducedMotion
+              ? { opacity: 1 }
+              : { opacity: 1, y: 0, scale: 1 }
+          }
+          exit={
+            prefersReducedMotion
+              ? { opacity: 0 }
+              : { opacity: 0, y: 3, scale: 0.98 }
+          }
+          transition={{ duration: 0.16 }}
+        >
+          {value}
+        </motion.strong>
+      </AnimatePresence>
+    </div>
+  )
+}
+
+function RunDebugDisclosure({ result }: { result: UploadResponse }) {
+  const [open, setOpen] = useState(false)
+  const prefersReducedMotion = useReducedMotion()
+
+  return (
+    <section className="debug-panel run-debug" aria-label="Run debug metadata">
+      <button
+        className="debug-summary"
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((current) => !current)}
+      >
+        Debug metadata
+      </button>
+      <AnimatePresence initial={false}>
+        {open ? (
+          <motion.section
+            className="debug-panel-content"
+            initial={
+              prefersReducedMotion ? { opacity: 0 } : { opacity: 0, height: 0 }
+            }
+            animate={
+              prefersReducedMotion ? { opacity: 1 } : { opacity: 1, height: 'auto' }
+            }
+            exit={
+              prefersReducedMotion ? { opacity: 0 } : { opacity: 0, height: 0 }
+            }
+            transition={{ duration: 0.18 }}
+          >
+            <div>
+              <span>Source filename</span>
+              <code>{result.source.filename}</code>
+            </div>
+            <div>
+              <span>Source ID</span>
+              <code>{result.source.id}</code>
+            </div>
+            <div>
+              <span>Run ID</span>
+              <code>{result.run.id}</code>
+            </div>
+            <div>
+              <span>Run status</span>
+              <code>{result.run.status}</code>
+            </div>
+            <div>
+              <span>SHA-256</span>
+              <code>{result.source.sha256}</code>
+            </div>
+            <div>
+              <span>Stored path</span>
+              <code>{result.source.artifactPath}</code>
+            </div>
+            <div>
+              <span>Byte size</span>
+              <code>{formatByteSize(result.source.byteSize)}</code>
+            </div>
+            <div>
+              <span>Run source ID</span>
+              <code>{result.run.sourceId}</code>
+            </div>
+          </motion.section>
+        ) : null}
+      </AnimatePresence>
+    </section>
+  )
 }
 
 function ReviewDeck({
@@ -695,8 +1074,34 @@ function formatByteSize(byteSize: number) {
   return `${(byteSize / 1024).toFixed(1)} KB`
 }
 
+function formatDuration(durationMs: number) {
+  const totalSeconds = Math.max(0, Math.floor(durationMs / 1000))
+
+  if (totalSeconds < 60) {
+    return `${totalSeconds}s`
+  }
+
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  return `${minutes}m ${seconds.toString().padStart(2, '0')}s`
+}
+
+function formatStatus(status: string) {
+  return status.replaceAll('_', ' ')
+}
+
 function formatOrigin(originType: string) {
   return originType.replaceAll('_', ' ')
+}
+
+function shortId(id: string) {
+  return id.slice(0, 8)
+}
+
+function isTerminalGenerationStatus(
+  status: string,
+): status is TerminalGenerationStatus {
+  return status === 'ready' || status === 'partial_failed'
 }
 
 function isEditableTarget(target: EventTarget | null) {

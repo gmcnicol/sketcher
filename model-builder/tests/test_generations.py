@@ -203,6 +203,42 @@ def test_generation_endpoint_creates_first_generation_with_24_ready_candidates(
     )
 
 
+def test_runs_history_lists_sources_generations_and_review_decisions(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    install_fast_renderer(monkeypatch)
+    workspace = tmp_path / "workspace"
+    client = TestClient(create_app(workspace))
+    upload = upload_source(client)
+    run_id = upload["run"]["id"]
+    generation = client.post(f"/runs/{run_id}/generations").json()["generation"]
+
+    client.post(
+        f"/runs/{run_id}/review/decisions",
+        json={"candidateId": generation["candidates"][0]["id"], "decision": "survived"},
+    )
+    client.post(
+        f"/runs/{run_id}/review/decisions",
+        json={"candidateId": generation["candidates"][1]["id"], "decision": "rejected"},
+    )
+
+    response = client.get("/runs")
+
+    assert response.status_code == 200
+    runs = response.json()["runs"]
+    assert len(runs) == 1
+    assert runs[0]["id"] == run_id
+    assert runs[0]["source"]["filename"] == "source.svg"
+    assert len(runs[0]["generations"]) == 1
+    history_generation = runs[0]["generations"][0]
+    assert history_generation["survivorCount"] == 1
+    assert history_generation["rejectedCount"] == 1
+    assert history_generation["candidates"][0]["reviewDecision"] == "survived"
+    assert history_generation["candidates"][1]["reviewDecision"] == "rejected"
+    assert history_generation["candidates"][2]["reviewDecision"] is None
+
+
 @pytest.mark.parametrize(
     ("filename", "source_svg"),
     [

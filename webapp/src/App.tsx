@@ -35,6 +35,7 @@ type CandidateSummary = {
   sha256: string | null
   validationStatus: string
   validationMessage: string | null
+  reviewDecision: ReviewDecision | null
   parentCandidateIds: string[]
   parentGenerationId: string | null
   createdAt: string
@@ -60,6 +61,19 @@ type GenerationSummary = {
 
 type GenerationResponse = {
   generation: GenerationSummary
+}
+
+type RunHistoryEntry = {
+  id: string
+  sourceId: string
+  status: string
+  createdAt: string
+  source: UploadSource & { createdAt: string }
+  generations: GenerationSummary[]
+}
+
+type RunsResponse = {
+  runs: RunHistoryEntry[]
 }
 
 type ReviewState = {
@@ -97,6 +111,9 @@ function App() {
   const [error, setError] = useState<string | null>(null)
   const [generationError, setGenerationError] = useState<string | null>(null)
   const [reviewError, setReviewError] = useState<string | null>(null)
+  const [historyError, setHistoryError] = useState<string | null>(null)
+  const [runHistory, setRunHistory] = useState<RunHistoryEntry[]>([])
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false)
   const [isUploading, setIsUploading] = useState(false)
   const [isGenerating, setIsGenerating] = useState(false)
   const [isReviewing, setIsReviewing] = useState(false)
@@ -132,6 +149,30 @@ function App() {
     isTerminalGenerationStatus(generation.status) &&
     generation.readyCount > 0 &&
     !generationRequestInFlight
+
+  const fetchRunHistory = useCallback(async () => {
+    setIsLoadingHistory(true)
+    setHistoryError(null)
+
+    try {
+      const response = await fetch(`${apiBaseUrl}/runs`)
+      const body = await response.json().catch(() => null)
+
+      if (!response.ok) {
+        throw new Error(body?.detail ?? 'Run history failed to load.')
+      }
+
+      setRunHistory((body as RunsResponse).runs)
+    } catch (historyLoadError) {
+      setHistoryError(
+        historyLoadError instanceof Error
+          ? historyLoadError.message
+          : 'Run history failed unexpectedly.',
+      )
+    } finally {
+      setIsLoadingHistory(false)
+    }
+  }, [])
 
   const fetchReview = useCallback(async (runId: string) => {
     const response = await fetch(`${apiBaseUrl}/runs/${runId}/review/current`)
@@ -186,8 +227,43 @@ function App() {
         reviewedTerminalGenerationRef.current = nextGeneration.id
         await fetchReview(result?.run.id ?? nextGeneration.runId)
       }
+      await fetchRunHistory()
     },
-    [fetchReview, generation?.id, generationRequestInFlight, result],
+    [fetchReview, fetchRunHistory, generation?.id, generationRequestInFlight, result],
+  )
+
+  const openHistoryRun = useCallback(
+    async (historyRun: RunHistoryEntry) => {
+      const latestGeneration = historyRun.generations[0] ?? null
+      setSelectedFile(null)
+      setResult({
+        source: historyRun.source,
+        run: {
+          id: historyRun.id,
+          sourceId: historyRun.sourceId,
+          status: historyRun.status,
+        },
+      })
+      setGeneration(latestGeneration)
+      setReview(null)
+      setError(null)
+      setGenerationError(null)
+      setReviewError(null)
+      setGenerationRequestInFlight(false)
+      setGenerationStartedAt(null)
+      setLastProgressAt(null)
+      setLoadedCandidateImageId(null)
+      reviewedTerminalGenerationRef.current = null
+
+      if (
+        latestGeneration &&
+        isTerminalGenerationStatus(latestGeneration.status) &&
+        latestGeneration.readyCount > 0
+      ) {
+        await fetchReview(historyRun.id)
+      }
+    },
+    [fetchReview],
   )
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -229,6 +305,7 @@ function App() {
       }
 
       setResult(body as UploadResponse)
+      await fetchRunHistory()
     } catch (uploadError) {
       setError(
         uploadError instanceof Error
@@ -314,6 +391,7 @@ function App() {
         }
 
         setReview((body as ReviewResponse).review)
+        await fetchRunHistory()
       } catch (decisionError) {
         setReviewError(
           decisionError instanceof Error
@@ -325,7 +403,7 @@ function App() {
         reviewActionInFlightRef.current = false
       }
     },
-    [candidateImageLoaded, isReviewing, result, review],
+    [candidateImageLoaded, fetchRunHistory, isReviewing, result, review],
   )
 
   const undoReviewDecision = useCallback(async () => {
@@ -355,6 +433,7 @@ function App() {
       }
 
       setReview((body as ReviewResponse).review)
+      await fetchRunHistory()
     } catch (undoError) {
       setReviewError(
         undoError instanceof Error ? undoError.message : 'Undo failed unexpectedly.',
@@ -363,7 +442,7 @@ function App() {
       setIsReviewing(false)
       reviewActionInFlightRef.current = false
     }
-  }, [isReviewing, result, review])
+  }, [fetchRunHistory, isReviewing, result, review])
 
   const createNextGeneration = useCallback(
     async (mode: NextGenerationMode) => {
@@ -493,6 +572,11 @@ function App() {
   ])
 
   useEffect(() => {
+    const timeout = window.setTimeout(() => void fetchRunHistory(), 0)
+    return () => window.clearTimeout(timeout)
+  }, [fetchRunHistory])
+
+  useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
       if (isEditableTarget(event.target)) {
         return
@@ -597,6 +681,15 @@ function App() {
           </div>
         ) : null}
 
+        <RunHistory
+          runs={runHistory}
+          activeRunId={result?.run.id ?? null}
+          isLoading={isLoadingHistory}
+          error={historyError}
+          onRefresh={() => void fetchRunHistory()}
+          onOpenRun={(historyRun) => void openHistoryRun(historyRun)}
+        />
+
         <AnimatePresence>
           {generationRequestInFlight || generation ? (
             <GenerationProgress
@@ -672,6 +765,15 @@ type GenerationProgressProps = {
   isInFlight: boolean
   startedAt: number | null
   lastProgressAt: number | null
+}
+
+type RunHistoryProps = {
+  runs: RunHistoryEntry[]
+  activeRunId: string | null
+  isLoading: boolean
+  error: string | null
+  onRefresh: () => void
+  onOpenRun: (run: RunHistoryEntry) => void
 }
 
 function GenerationProgress({
@@ -799,6 +901,130 @@ function AnimatedMetric({ label, value }: AnimatedMetricProps) {
         </motion.strong>
       </AnimatePresence>
     </div>
+  )
+}
+
+function RunHistory({
+  runs,
+  activeRunId,
+  isLoading,
+  error,
+  onRefresh,
+  onOpenRun,
+}: RunHistoryProps) {
+  return (
+    <section className="history-panel" aria-label="Run history">
+      <div className="history-header">
+        <div>
+          <p className="eyebrow">History</p>
+          <h2>Previous runs</h2>
+        </div>
+        <button
+          className="secondary-action history-refresh"
+          type="button"
+          onClick={onRefresh}
+          disabled={isLoading}
+        >
+          {isLoading ? 'Refreshing...' : 'Refresh'}
+        </button>
+      </div>
+
+      {error ? (
+        <div className="status status-error" role="alert">
+          <span>History error</span>
+          <p>{error}</p>
+        </div>
+      ) : null}
+
+      {!isLoading && runs.length === 0 ? (
+        <div className="review-empty">No runs yet.</div>
+      ) : null}
+
+      <div className="history-run-list">
+        {runs.map((historyRun) => (
+          <article
+            className={`history-run${
+              historyRun.id === activeRunId ? ' history-run-active' : ''
+            }`}
+            key={historyRun.id}
+          >
+            <div className="history-run-main">
+              <div>
+                <h3>{historyRun.source.filename}</h3>
+                <p>
+                  {historyRun.generations.length} generations -{' '}
+                  {formatTimestamp(historyRun.createdAt)}
+                </p>
+              </div>
+              <div className="history-run-actions">
+                <span className="generation-progress-status">
+                  {historyRun.id === activeRunId ? 'Open' : formatStatus(historyRun.status)}
+                </span>
+                <button
+                  className="secondary-action history-open"
+                  type="button"
+                  onClick={() => onOpenRun(historyRun)}
+                >
+                  Open run
+                </button>
+              </div>
+            </div>
+
+            {historyRun.generations.map((generationItem) => (
+              <section
+                className="history-generation"
+                aria-label={`Generation ${generationItem.generationNumber} history`}
+                key={generationItem.id}
+              >
+                <div className="history-generation-header">
+                  <h4>Generation {generationItem.generationNumber}</h4>
+                  <div className="review-counts">
+                    <span>{generationItem.readyCount} ready</span>
+                    <span>{generationItem.survivorCount} survived</span>
+                    <span>{generationItem.rejectedCount} rejected</span>
+                  </div>
+                </div>
+                <div className="history-candidates">
+                  {generationItem.candidates.map((candidateItem) => (
+                    <HistoryCandidate
+                      candidate={candidateItem}
+                      key={candidateItem.id}
+                    />
+                  ))}
+                </div>
+              </section>
+            ))}
+          </article>
+        ))}
+      </div>
+    </section>
+  )
+}
+
+function HistoryCandidate({ candidate }: { candidate: CandidateSummary }) {
+  const decisionClass = candidate.reviewDecision
+    ? ` history-candidate-${candidate.reviewDecision}`
+    : ''
+  const label = candidate.reviewDecision ?? candidate.validationStatus
+
+  return (
+    <figure className={`history-candidate${decisionClass}`}>
+      {candidate.validationStatus === 'ready' ? (
+        <img
+          src={`${apiBaseUrl}/candidates/${encodeURIComponent(candidate.id)}/artifact`}
+          alt={`Generation ${candidate.generationNumber} candidate ${candidate.position}`}
+          loading="lazy"
+        />
+      ) : (
+        <div className="history-candidate-missing">{formatStatus(candidate.validationStatus)}</div>
+      )}
+      <figcaption>
+        <span>{label}</span>
+        <code>
+          #{candidate.position} - {formatOrigin(candidate.originType)}
+        </code>
+      </figcaption>
+    </figure>
   )
 }
 
@@ -1102,6 +1328,18 @@ function formatStatus(status: string) {
 
 function formatOrigin(originType: string) {
   return originType.replaceAll('_', ' ')
+}
+
+function formatTimestamp(timestamp: string) {
+  const date = new Date(timestamp)
+  if (Number.isNaN(date.getTime())) {
+    return timestamp
+  }
+
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  }).format(date)
 }
 
 function shortId(id: string) {

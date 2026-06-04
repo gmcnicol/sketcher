@@ -109,6 +109,7 @@ class CandidateSummary:
     sha256: str | None
     validation_status: str
     validation_message: str | None
+    review_decision: str | None
     parent_candidate_ids: list[str]
     parent_generation_id: str | None
     created_at: str
@@ -131,6 +132,26 @@ class GenerationSummary:
     can_reroll_generation: bool
     candidates: list[CandidateSummary]
     created_at: str
+
+
+@dataclass(frozen=True)
+class SourceSummary:
+    id: str
+    filename: str
+    sha256: str
+    byte_size: int
+    artifact_path: str
+    created_at: str
+
+
+@dataclass(frozen=True)
+class RunHistorySummary:
+    id: str
+    source_id: str
+    status: str
+    created_at: str
+    source: SourceSummary
+    generations: list[GenerationSummary]
 
 
 @dataclass(frozen=True)
@@ -371,6 +392,56 @@ def get_current_generation(workspace: Path, run_id: str) -> GenerationSummary:
             raise MissingGenerationError(f"Run {run_id} does not have a generation yet.")
 
         return generation_summary_from_row(db, generation)
+
+
+def list_run_history(workspace: Path) -> list[RunHistorySummary]:
+    workspace = ensure_workspace(workspace)
+    with connect(workspace) as db:
+        run_rows = db.execute(
+            """
+            SELECT
+                runs.*,
+                sources.original_filename AS source_filename,
+                sources.sha256 AS source_sha256,
+                sources.byte_size AS source_byte_size,
+                sources.artifact_path AS source_artifact_path,
+                sources.created_at AS source_created_at
+            FROM runs
+            JOIN sources ON sources.id = runs.source_id
+            ORDER BY runs.created_at DESC, runs.id DESC
+            """
+        ).fetchall()
+        generation_rows = db.execute(
+            """
+            SELECT * FROM generations
+            ORDER BY run_id, generation_number DESC
+            """
+        ).fetchall()
+
+        generations_by_run: dict[str, list[GenerationSummary]] = {}
+        for generation in generation_rows:
+            generations_by_run.setdefault(generation["run_id"], []).append(
+                generation_summary_from_row(db, generation)
+            )
+
+        return [
+            RunHistorySummary(
+                id=row["id"],
+                source_id=row["source_id"],
+                status=row["status"],
+                created_at=row["created_at"],
+                source=SourceSummary(
+                    id=row["source_id"],
+                    filename=row["source_filename"],
+                    sha256=row["source_sha256"],
+                    byte_size=row["source_byte_size"],
+                    artifact_path=row["source_artifact_path"],
+                    created_at=row["source_created_at"],
+                ),
+                generations=generations_by_run.get(row["id"], []),
+            )
+            for row in run_rows
+        ]
 
 
 def load_current_generation_row(
@@ -1625,8 +1696,13 @@ def generation_summary_from_row(
         (generation["id"],),
     ).fetchall()
     parent_links = load_candidate_parent_links(db, [row["id"] for row in rows])
+    decisions = load_candidate_review_decisions(db, generation["id"])
     candidates = [
-        candidate_summary_from_row(row, parent_links.get(row["id"], []))
+        candidate_summary_from_row(
+            row,
+            parent_links.get(row["id"], []),
+            decisions.get(row["id"]),
+        )
         for row in rows
     ]
     ready_count = sum(
@@ -1679,6 +1755,23 @@ def load_candidate_parent_links(
     return links
 
 
+def load_candidate_review_decisions(
+    db: sqlite3.Connection,
+    generation_id: str,
+) -> dict[str, str]:
+    rows = db.execute(
+        """
+        SELECT candidate_id, decision
+        FROM candidate_decisions
+        WHERE generation_id = ?
+          AND undone_at IS NULL
+        ORDER BY created_at
+        """,
+        (generation_id,),
+    ).fetchall()
+    return {row["candidate_id"]: row["decision"] for row in rows}
+
+
 def generation_review_counts(
     db: sqlite3.Connection,
     generation_id: str,
@@ -1706,6 +1799,7 @@ def generation_review_counts(
 def candidate_summary_from_row(
     row: sqlite3.Row,
     parent_links: list[sqlite3.Row],
+    review_decision: str | None = None,
 ) -> CandidateSummary:
     parent_candidate_ids = [link["parent_candidate_id"] for link in parent_links]
     parent_generation_id = (
@@ -1724,6 +1818,7 @@ def candidate_summary_from_row(
         sha256=row["sha256"],
         validation_status=row["validation_status"],
         validation_message=row["validation_message"],
+        review_decision=review_decision,
         parent_candidate_ids=parent_candidate_ids,
         parent_generation_id=parent_generation_id,
         created_at=row["created_at"],
@@ -1760,6 +1855,7 @@ def generation_summary_to_api(summary: GenerationSummary) -> dict[str, Any]:
                 "sha256": candidate.sha256,
                 "validationStatus": candidate.validation_status,
                 "validationMessage": candidate.validation_message,
+                "reviewDecision": candidate.review_decision,
                 "parentCandidateIds": candidate.parent_candidate_ids,
                 "parentGenerationId": candidate.parent_generation_id,
                 "createdAt": candidate.created_at,
@@ -1767,3 +1863,27 @@ def generation_summary_to_api(summary: GenerationSummary) -> dict[str, Any]:
             for candidate in summary.candidates
         ],
     }
+
+
+def run_history_to_api(runs: list[RunHistorySummary]) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": run.id,
+            "sourceId": run.source_id,
+            "status": run.status,
+            "createdAt": run.created_at,
+            "source": {
+                "id": run.source.id,
+                "filename": run.source.filename,
+                "sha256": run.source.sha256,
+                "byteSize": run.source.byte_size,
+                "artifactPath": run.source.artifact_path,
+                "createdAt": run.source.created_at,
+            },
+            "generations": [
+                generation_summary_to_api(generation)
+                for generation in run.generations
+            ],
+        }
+        for run in runs
+    ]

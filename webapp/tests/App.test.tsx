@@ -55,6 +55,7 @@ type Candidate = {
   sha256: string | null
   validationStatus: string
   validationMessage: string | null
+  reviewDecision: 'survived' | 'rejected' | null
   parentCandidateIds: string[]
   parentGenerationId: string | null
   createdAt: string
@@ -89,6 +90,24 @@ type Review = {
   rejectedCount: number
   reviewedCount: number
   complete: boolean
+}
+
+type HistorySource = {
+  id: string
+  filename: string
+  sha256: string
+  byteSize: number
+  artifactPath: string
+  createdAt: string
+}
+
+type RunHistoryEntry = {
+  id: string
+  sourceId: string
+  status: string
+  createdAt: string
+  source: HistorySource
+  generations: Generation[]
 }
 
 const source = {
@@ -138,6 +157,52 @@ describe('App MVP flow', () => {
     expect(screen.getAllByText(source.id)).toHaveLength(2)
     expect(screen.getByText(source.sha256)).toBeTruthy()
     expect(screen.getByText('128 B')).toBeTruthy()
+  })
+
+  it('loads previous runs and opens survivor history', async () => {
+    const user = userEvent.setup()
+    const survivor = candidate({
+      id: 'history-survivor',
+      position: 1,
+      reviewDecision: 'survived',
+    })
+    const rejected = candidate({
+      id: 'history-rejected',
+      position: 2,
+      reviewDecision: 'rejected',
+    })
+    const historyGeneration = generation({
+      candidates: [survivor, rejected],
+      reviewedCount: 2,
+      survivorCount: 1,
+      rejectedCount: 1,
+    })
+    installFetch({
+      historyRuns: [
+        runHistory({
+          generations: [historyGeneration],
+        }),
+      ],
+      review: review({
+        currentCandidate: null,
+        reviewedCount: 2,
+        survivorCount: 1,
+        rejectedCount: 1,
+        complete: false,
+      }),
+    })
+    render(<App />)
+
+    expect(await screen.findByText('Previous runs')).toBeTruthy()
+    expect(screen.getByText('1 survived')).toBeTruthy()
+    expect(screen.getByText('1 rejected')).toBeTruthy()
+    expect(screen.getByText('survived')).toBeTruthy()
+    expect(screen.getByText('rejected')).toBeTruthy()
+
+    await user.click(screen.getByRole('button', { name: /open run/i }))
+
+    expect(await screen.findByLabelText('Generation progress')).toBeTruthy()
+    expect(screen.getAllByText('Generation 1')).toBeTruthy()
   })
 
   it('generates candidates, shows progress, loads review state, and renders the artifact image URL', async () => {
@@ -355,6 +420,7 @@ function candidate(overrides: Partial<Candidate> = {}): Candidate {
     sha256: 'b'.repeat(64),
     validationStatus: 'ready',
     validationMessage: 'Candidate SVG passed validation.',
+    reviewDecision: null,
     parentCandidateIds: [],
     parentGenerationId: null,
     createdAt: '2026-06-04T00:00:00+00:00',
@@ -403,6 +469,21 @@ function review(overrides: Partial<Review> = {}): Review {
   }
 }
 
+function runHistory(overrides: Partial<RunHistoryEntry> = {}): RunHistoryEntry {
+  return {
+    id: run.id,
+    sourceId: source.id,
+    status: 'active',
+    createdAt: '2026-06-04T00:00:00+00:00',
+    source: {
+      ...source,
+      createdAt: '2026-06-04T00:00:00+00:00',
+    },
+    generations: [],
+    ...overrides,
+  }
+}
+
 type FetchScenario = {
   generation?: Generation
   review?: Review
@@ -410,6 +491,7 @@ type FetchScenario = {
   undoReviews?: Review[]
   nextGeneration?: Generation
   nextReview?: Review
+  historyRuns?: RunHistoryEntry[]
 }
 
 function installFetch({
@@ -423,6 +505,7 @@ function installFetch({
   undoReviews = [],
   nextGeneration,
   nextReview,
+  historyRuns = [],
 }: FetchScenario = {}) {
   let currentGeneration: Generation | null = null
   let currentReview = firstReview
@@ -432,6 +515,10 @@ function installFetch({
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input)
     const method = init?.method ?? 'GET'
+
+    if (url === '/api/runs' && method === 'GET') {
+      return jsonResponse({ runs: historyRuns })
+    }
 
     if (url === '/api/sources' && method === 'POST') {
       return jsonResponse(uploadResponse, 201)

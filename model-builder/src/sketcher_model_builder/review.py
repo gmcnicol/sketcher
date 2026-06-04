@@ -44,6 +44,10 @@ class NothingToUndoError(ReviewError):
     """Raised when there is no active review decision to undo."""
 
 
+class GenerationRunningError(ReviewError):
+    """Raised when review is requested before generation rendering is complete."""
+
+
 class CandidateArtifactError(ReviewError):
     """Raised when a candidate artifact cannot be safely served."""
 
@@ -90,6 +94,7 @@ def get_current_review_state(workspace: Path, run_id: str) -> ReviewState:
     workspace = ensure_workspace(workspace)
     with connect(workspace) as db:
         generation = load_current_generation_row(db, run_id)
+        validate_generation_ready_for_review(generation)
         return review_state_from_db(db, run_id, generation)
 
 
@@ -106,6 +111,7 @@ def record_candidate_decision(
 
     with connect(workspace) as db:
         generation = load_current_generation_row(db, run_id)
+        validate_generation_ready_for_review(generation)
         candidate = load_candidate_row(db, candidate_id)
         validate_candidate_in_current_generation(candidate, run_id, generation)
 
@@ -158,6 +164,7 @@ def undo_latest_decision(workspace: Path, run_id: str) -> ReviewState:
     workspace = ensure_workspace(workspace)
     with connect(workspace) as db:
         generation = load_current_generation_row(db, run_id)
+        validate_generation_ready_for_review(generation)
         row = db.execute(
             """
             SELECT id FROM candidate_decisions
@@ -271,6 +278,13 @@ def validate_candidate_in_current_generation(
     if candidate["validation_status"] != "ready":
         raise CandidateNotReadyError(
             f"Candidate {candidate['id']} is not ready for review."
+        )
+
+
+def validate_generation_ready_for_review(generation: sqlite3.Row) -> None:
+    if generation["status"] == "running":
+        raise GenerationRunningError(
+            f"Generation {generation['id']} is still running and cannot be reviewed yet."
         )
 
 

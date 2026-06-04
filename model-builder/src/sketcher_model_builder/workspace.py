@@ -192,6 +192,7 @@ def connect(workspace: Path) -> sqlite3.Connection:
     connection = sqlite3.connect(workspace / "sketcher.sqlite3")
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
+    connection.execute("PRAGMA busy_timeout = 5000")
     return connection
 
 

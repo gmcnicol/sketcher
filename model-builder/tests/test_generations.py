@@ -19,6 +19,24 @@ VALID_SOURCE_SVG = b"""\
 </svg>
 """
 
+TOM2_SOURCE_SVG = (Path(__file__).parent / "fixtures" / "tom2.svg").read_bytes()
+TINY_PATH_SOURCE_SVG = b"""\
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">
+  <path id="tiny-mark" d="M 4.9 5 L 5.1 5.1" style="fill:none;stroke:#000;stroke-width:0.1" />
+</svg>
+"""
+FILLED_BASIC_SHAPE_SOURCE_SVG = b"""\
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">
+  <rect id="filled-box" x="1" y="1" width="8" height="8" fill="#000" />
+</svg>
+"""
+TRANSFORMED_GROUP_SOURCE_SVG = b"""\
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20">
+  <g transform="translate(5 4)">
+    <path id="translated-line" d="M 1 1 L 9 9" style="fill:none;stroke:#000;stroke-width:1" />
+  </g>
+</svg>
+"""
 EMPTY_SOURCE_SVG = b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"></svg>'
 LONG_TRACED_STROKE_SVG = b"""\
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 40">
@@ -28,10 +46,15 @@ LONG_TRACED_STROKE_SVG = b"""\
 """
 
 
-def upload_source(client: TestClient, svg: bytes = VALID_SOURCE_SVG) -> dict:
+def upload_source(
+    client: TestClient,
+    svg: bytes = VALID_SOURCE_SVG,
+    *,
+    filename: str = "source.svg",
+) -> dict:
     response = client.post(
         "/sources",
-        files={"file": ("source.svg", svg, "image/svg+xml")},
+        files={"file": (filename, svg, "image/svg+xml")},
     )
     assert response.status_code == 201
     return response.json()
@@ -166,6 +189,72 @@ def test_generation_endpoint_creates_first_generation_with_24_ready_candidates(
         and candidate["parentGenerationId"] is None
         for candidate in generation["candidates"]
     )
+
+
+@pytest.mark.parametrize(
+    ("filename", "source_svg"),
+    [
+        ("tom2.svg", TOM2_SOURCE_SVG),
+        ("tiny-path.svg", TINY_PATH_SOURCE_SVG),
+        ("filled-basic-shape.svg", FILLED_BASIC_SHAPE_SOURCE_SVG),
+        ("transformed-group.svg", TRANSFORMED_GROUP_SOURCE_SVG),
+    ],
+)
+def test_mvp_first_generation_flow_accepts_representative_svg_sources(
+    tmp_path: Path,
+    monkeypatch,
+    filename: str,
+    source_svg: bytes,
+) -> None:
+    install_fast_renderer(monkeypatch)
+    workspace = tmp_path / "workspace"
+    client = TestClient(create_app(workspace))
+    upload = upload_source(client, source_svg, filename=filename)
+
+    response = client.post(f"/runs/{upload['run']['id']}/generations")
+
+    assert response.status_code == 201
+    source = upload["source"]
+    run = upload["run"]
+    generation = response.json()["generation"]
+    assert uuid.UUID(source["id"]).version == 7
+    assert uuid.UUID(run["id"]).version == 7
+    assert uuid.UUID(generation["id"]).version == 7
+    assert source["filename"] == filename
+    assert generation["runId"] == run["id"]
+    assert generation["generationNumber"] == 1
+    assert generation["status"] == "ready"
+    assert generation["readyCount"] == 24
+    assert generation["failedCount"] == 0
+    assert generation["totalCandidateCount"] == 24
+
+    source_artifact_path = Path(source["artifactPath"])
+    assert not source_artifact_path.is_absolute()
+    assert source_artifact_path.parts[:2] == ("artifacts", "sources")
+    source_artifact = workspace / source_artifact_path
+    assert source_artifact.exists()
+    assert source["byteSize"] == len(source_artifact.read_bytes())
+
+    source_rows = fetch_rows(workspace, "sources")
+    run_rows = fetch_rows(workspace, "runs")
+    generation_rows = fetch_rows(workspace, "generations")
+    candidate_rows = fetch_rows(workspace, "candidates")
+    decision_rows = fetch_rows(workspace, "candidate_decisions")
+    assert source_rows[0]["id"] == source["id"]
+    assert source_rows[0]["artifact_path"] == source["artifactPath"]
+    assert run_rows[0]["id"] == run["id"]
+    assert run_rows[0]["source_id"] == source["id"]
+    assert generation_rows[0]["id"] == generation["id"]
+    assert generation_rows[0]["status"] == "ready"
+    assert len(candidate_rows) == 24
+    assert decision_rows == []
+
+    for candidate_row in candidate_rows:
+        assert uuid.UUID(candidate_row["id"]).version == 7
+        artifact_path = Path(candidate_row["artifact_path"])
+        assert not artifact_path.is_absolute()
+        assert artifact_path.parts[:2] == ("artifacts", "candidates")
+        assert (workspace / artifact_path).exists()
 
 
 def test_split_source_first_generation_uses_lower_retrace_counts(

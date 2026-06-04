@@ -2,6 +2,7 @@ import hashlib
 import json
 import random
 import sqlite3
+import threading
 import uuid
 from pathlib import Path
 
@@ -60,6 +61,18 @@ def install_fast_renderer(monkeypatch) -> None:
         )
 
     monkeypatch.setattr(generations, "render_candidate_svg", fake_render_candidate_svg)
+
+
+def write_valid_candidate_svg(artifact_path: Path, seed: object = 1) -> None:
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    artifact_path.write_text(
+        f"""<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">
+  <path d="M 1 1 L 9 9" style="fill:none;stroke:#111;stroke-width:1;stroke-opacity:1" data-sketcher-pass="{seed}" />
+</svg>
+""",
+        encoding="utf-8",
+    )
 
 
 def review_generation(
@@ -258,6 +271,168 @@ def test_failed_render_attempts_are_persisted_and_excluded_from_ready_counts(
     assert {row["validation_message"] for row in failed} == {"forced render failure"}
 
 
+def test_running_first_generation_is_visible_before_request_completes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    client = TestClient(create_app(workspace))
+    run_id = upload_source(client)["run"]["id"]
+    second_attempt_started = threading.Event()
+    continue_rendering = threading.Event()
+    calls = 0
+    lock = threading.Lock()
+
+    def fake_render_candidate_svg(
+        source_path: Path,
+        artifact_path: Path,
+        render_parameters: dict,
+    ) -> None:
+        nonlocal calls
+        with lock:
+            calls += 1
+            attempt = calls
+        if attempt == 2:
+            second_attempt_started.set()
+            if not continue_rendering.wait(timeout=5):
+                raise RuntimeError("timed out waiting to continue rendering")
+        write_valid_candidate_svg(artifact_path, render_parameters["seed"])
+
+    monkeypatch.setattr(generations, "render_candidate_svg", fake_render_candidate_svg)
+    result: dict[str, object] = {}
+
+    def create_generation() -> None:
+        try:
+            result["summary"] = generations.create_first_generation(workspace, run_id)
+        except Exception as error:  # pragma: no cover - re-raised in the test thread.
+            result["error"] = error
+
+    thread = threading.Thread(target=create_generation)
+    thread.start()
+    assert second_attempt_started.wait(timeout=5)
+
+    current_response = client.get(f"/runs/{run_id}/generations/current")
+    review_response = client.get(f"/runs/{run_id}/review/current")
+
+    assert current_response.status_code == 200
+    running_generation = current_response.json()["generation"]
+    assert running_generation["status"] == "running"
+    assert running_generation["totalCandidateCount"] == 1
+    assert running_generation["readyCount"] == 1
+    assert running_generation["failedCount"] == 0
+    assert review_response.status_code == 409
+    assert "still running" in review_response.json()["detail"]
+
+    candidate_id = running_generation["candidates"][0]["id"]
+    decision_response = client.post(
+        f"/runs/{run_id}/review/decisions",
+        json={"candidateId": candidate_id, "decision": "survived"},
+    )
+    duplicate_response = client.post(f"/runs/{run_id}/generations")
+
+    assert decision_response.status_code == 409
+    assert "still running" in decision_response.json()["detail"]
+    assert duplicate_response.status_code == 409
+
+    continue_rendering.set()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    if "error" in result:
+        raise result["error"]  # type: ignore[misc]
+    summary = result["summary"]
+    assert isinstance(summary, generations.GenerationSummary)
+    assert summary.status == "ready"
+    assert summary.ready_count == 24
+
+
+def test_failed_render_attempt_is_visible_while_generation_is_running(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    client = TestClient(create_app(workspace))
+    run_id = upload_source(client)["run"]["id"]
+    second_attempt_started = threading.Event()
+    continue_rendering = threading.Event()
+    calls = 0
+    lock = threading.Lock()
+
+    def fake_render_candidate_svg(
+        source_path: Path,
+        artifact_path: Path,
+        render_parameters: dict,
+    ) -> None:
+        nonlocal calls
+        with lock:
+            calls += 1
+            attempt = calls
+        if attempt == 1:
+            raise RuntimeError("first candidate failed")
+        if attempt == 2:
+            second_attempt_started.set()
+            if not continue_rendering.wait(timeout=5):
+                raise RuntimeError("timed out waiting to continue rendering")
+        write_valid_candidate_svg(artifact_path, render_parameters["seed"])
+
+    monkeypatch.setattr(generations, "render_candidate_svg", fake_render_candidate_svg)
+    result: dict[str, object] = {}
+
+    def create_generation() -> None:
+        try:
+            result["summary"] = generations.create_first_generation(workspace, run_id)
+        except Exception as error:  # pragma: no cover - re-raised in the test thread.
+            result["error"] = error
+
+    thread = threading.Thread(target=create_generation)
+    thread.start()
+    assert second_attempt_started.wait(timeout=5)
+
+    current_response = client.get(f"/runs/{run_id}/generations/current")
+
+    assert current_response.status_code == 200
+    running_generation = current_response.json()["generation"]
+    assert running_generation["status"] == "running"
+    assert running_generation["totalCandidateCount"] == 1
+    assert running_generation["readyCount"] == 0
+    assert running_generation["failedCount"] == 1
+    assert running_generation["candidates"][0]["validationStatus"] == "failed"
+    assert running_generation["candidates"][0]["validationMessage"] == "first candidate failed"
+
+    continue_rendering.set()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    if "error" in result:
+        raise result["error"]  # type: ignore[misc]
+
+
+def test_generation_becomes_partial_failed_when_attempts_are_exhausted(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    client = TestClient(create_app(workspace))
+    run_id = upload_source(client)["run"]["id"]
+
+    def fake_render_candidate_svg(
+        source_path: Path,
+        artifact_path: Path,
+        render_parameters: dict,
+    ) -> None:
+        raise RuntimeError("forced render failure")
+
+    monkeypatch.setattr(generations, "MAX_FIRST_GENERATION_ATTEMPTS", 3)
+    monkeypatch.setattr(generations, "render_candidate_svg", fake_render_candidate_svg)
+
+    response = client.post(f"/runs/{run_id}/generations")
+
+    assert response.status_code == 201
+    generation = response.json()["generation"]
+    assert generation["status"] == "partial_failed"
+    assert generation["totalCandidateCount"] == 3
+    assert generation["readyCount"] == 0
+    assert generation["failedCount"] == 3
+
+
 def test_survivor_stroke_count_mutations_can_reach_thousands() -> None:
     parent_parameters = {"repeats": 28, "shade_strokes": 58}
 
@@ -440,6 +615,75 @@ def test_normal_breed_creates_two_immigrants(tmp_path: Path, monkeypatch) -> Non
     assert len([c for c in ready_candidates if c["originType"] == "random_immigrant"]) == 2
     assert len([c for c in ready_candidates if c["originType"] == "survivor_carryover"]) == 5
     assert len([c for c in ready_candidates if c["originType"] == "survivor_mutation"]) == 17
+
+
+def test_running_next_generation_is_visible_before_request_completes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    install_fast_renderer(monkeypatch)
+    workspace = tmp_path / "workspace"
+    client = TestClient(create_app(workspace))
+    run_id = upload_source(client)["run"]["id"]
+    generation = client.post(f"/runs/{run_id}/generations").json()["generation"]
+    review_generation(client, run_id, generation["candidates"], survivor_count=5)
+
+    second_attempt_started = threading.Event()
+    continue_rendering = threading.Event()
+    calls = 0
+    lock = threading.Lock()
+
+    def fake_render_candidate_svg(
+        source_path: Path,
+        artifact_path: Path,
+        render_parameters: dict,
+    ) -> None:
+        nonlocal calls
+        with lock:
+            calls += 1
+            attempt = calls
+        if attempt == 2:
+            second_attempt_started.set()
+            if not continue_rendering.wait(timeout=5):
+                raise RuntimeError("timed out waiting to continue rendering")
+        write_valid_candidate_svg(artifact_path, render_parameters["seed"])
+
+    monkeypatch.setattr(generations, "render_candidate_svg", fake_render_candidate_svg)
+    result: dict[str, object] = {}
+
+    def create_generation() -> None:
+        try:
+            result["summary"] = generations.create_next_generation(
+                workspace,
+                run_id,
+                mode="breed",
+            )
+        except Exception as error:  # pragma: no cover - re-raised in the test thread.
+            result["error"] = error
+
+    thread = threading.Thread(target=create_generation)
+    thread.start()
+    assert second_attempt_started.wait(timeout=5)
+
+    current_response = client.get(f"/runs/{run_id}/generations/current")
+
+    assert current_response.status_code == 200
+    running_generation = current_response.json()["generation"]
+    assert running_generation["generationNumber"] == 2
+    assert running_generation["status"] == "running"
+    assert running_generation["totalCandidateCount"] == 1
+    assert running_generation["readyCount"] == 1
+    assert running_generation["candidates"][0]["originType"] == "survivor_mutation"
+
+    continue_rendering.set()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    if "error" in result:
+        raise result["error"]  # type: ignore[misc]
+    summary = result["summary"]
+    assert isinstance(summary, generations.GenerationSummary)
+    assert summary.status == "ready"
+    assert summary.ready_count == 24
 
 
 def test_survivor_carryovers_are_appended_last_and_capped(

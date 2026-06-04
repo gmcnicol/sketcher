@@ -36,6 +36,7 @@ from .review import (
     CandidateNotReadyError,
     CandidateScopeError,
     DuplicateDecisionError,
+    GenerationRunningError,
     NothingToUndoError,
     ReviewCompleteError,
     ReviewError,
@@ -199,6 +200,11 @@ def create_app(workspace: Path | None = None) -> FastAPI:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=str(error),
             ) from error
+        except GenerationRunningError as error:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(error),
+            ) from error
 
         return {"review": review_state_to_api(state)}
 
@@ -217,6 +223,11 @@ def create_app(workspace: Path | None = None) -> FastAPI:
         except (UnknownRunError, MissingGenerationError, UnknownCandidateError) as error:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
+                detail=str(error),
+            ) from error
+        except GenerationRunningError as error:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
                 detail=str(error),
             ) from error
         except (DuplicateDecisionError, ReviewCompleteError) as error:
@@ -242,6 +253,11 @@ def create_app(workspace: Path | None = None) -> FastAPI:
                 detail=str(error),
             ) from error
         except NothingToUndoError as error:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(error),
+            ) from error
+        except GenerationRunningError as error:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=str(error),

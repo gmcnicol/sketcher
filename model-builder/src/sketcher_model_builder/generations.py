@@ -149,16 +149,15 @@ def create_first_generation(workspace: Path, run_id: str) -> GenerationSummary:
 
     generation_id = new_uuid7()
     created_at = utc_now()
+    insert_generation_row(
+        workspace,
+        generation_id=generation_id,
+        run_id=run_id,
+        generation_number=1,
+        created_at=created_at,
+    )
 
-    with connect(workspace) as db:
-        db.execute(
-            """
-            INSERT INTO generations (id, run_id, generation_number, status, created_at)
-            VALUES (?, ?, 1, 'running', ?)
-            """,
-            (generation_id, run_id, created_at),
-        )
-
+    try:
         ready_count = 0
         for attempt in range(1, MAX_FIRST_GENERATION_ATTEMPTS + 1):
             if ready_count >= FIRST_GENERATION_SIZE:
@@ -204,8 +203,8 @@ def create_first_generation(workspace: Path, run_id: str) -> GenerationSummary:
                     byte_size = len(data)
                     sha256 = hashlib.sha256(data).hexdigest()
 
-            insert_candidate(
-                db,
+            persist_candidate(
+                workspace,
                 candidate_id=candidate_id,
                 run_id=run_id,
                 generation_id=generation_id,
@@ -223,10 +222,10 @@ def create_first_generation(workspace: Path, run_id: str) -> GenerationSummary:
             )
 
         status = "ready" if ready_count == FIRST_GENERATION_SIZE else "partial_failed"
-        db.execute(
-            "UPDATE generations SET status = ? WHERE id = ?",
-            (status, generation_id),
-        )
+        update_generation_status(workspace, generation_id, status)
+    except Exception:
+        update_generation_status(workspace, generation_id, "partial_failed")
+        raise
 
     return get_current_generation(workspace, run_id)
 
@@ -267,19 +266,18 @@ def create_next_generation(
     immigrant_target = next_generation_immigrant_target(len(survivors), mode)
     mutation_target = NEXT_GENERATION_SIZE - immigrant_target - len(carryovers)
 
-    with connect(workspace) as db:
-        db.execute(
-            """
-            INSERT INTO generations (id, run_id, generation_number, status, created_at)
-            VALUES (?, ?, ?, 'running', ?)
-            """,
-            (generation_id, run_id, generation_number, created_at),
-        )
+    insert_generation_row(
+        workspace,
+        generation_id=generation_id,
+        run_id=run_id,
+        generation_number=generation_number,
+        created_at=created_at,
+    )
 
+    try:
         position = 1
         ready_count = 0
         mutation_ready_count, position = render_next_generation_group(
-            db,
             workspace,
             source_context=source_context,
             run_id=run_id,
@@ -299,7 +297,6 @@ def create_next_generation(
         ready_count += mutation_ready_count
 
         immigrant_ready_count, position = render_next_generation_group(
-            db,
             workspace,
             source_context=source_context,
             run_id=run_id,
@@ -319,7 +316,6 @@ def create_next_generation(
 
         for parent in carryovers:
             copy_survivor_carryover(
-                db,
                 workspace,
                 run_id=run_id,
                 generation_id=generation_id,
@@ -331,10 +327,10 @@ def create_next_generation(
             ready_count += 1
 
         status = "ready" if ready_count == NEXT_GENERATION_SIZE else "partial_failed"
-        db.execute(
-            "UPDATE generations SET status = ? WHERE id = ?",
-            (status, generation_id),
-        )
+        update_generation_status(workspace, generation_id, status)
+    except Exception:
+        update_generation_status(workspace, generation_id, "partial_failed")
+        raise
 
     return get_current_generation(workspace, run_id)
 
@@ -442,6 +438,41 @@ def generation_exists(db: sqlite3.Connection, run_id: str) -> bool:
         ).fetchone()
         is not None
     )
+
+
+def insert_generation_row(
+    workspace: Path,
+    *,
+    generation_id: str,
+    run_id: str,
+    generation_number: int,
+    created_at: str,
+) -> None:
+    try:
+        with connect(workspace) as db:
+            db.execute(
+                """
+                INSERT INTO generations (id, run_id, generation_number, status, created_at)
+                VALUES (?, ?, ?, 'running', ?)
+                """,
+                (generation_id, run_id, generation_number, created_at),
+            )
+    except sqlite3.IntegrityError as error:
+        raise DuplicateGenerationError(
+            f"Run {run_id} already has generation {generation_number}."
+        ) from error
+
+
+def update_generation_status(
+    workspace: Path,
+    generation_id: str,
+    status: str,
+) -> None:
+    with connect(workspace) as db:
+        db.execute(
+            "UPDATE generations SET status = ? WHERE id = ?",
+            (status, generation_id),
+        )
 
 
 def review_completion_counts(
@@ -1199,7 +1230,6 @@ def bounds_are_obviously_out_of_bounds(
 
 
 def render_next_generation_group(
-    db: sqlite3.Connection,
     workspace: Path,
     *,
     source_context: SourceContext,
@@ -1253,8 +1283,8 @@ def render_next_generation_group(
                 byte_size = len(data)
                 sha256 = hashlib.sha256(data).hexdigest()
 
-        insert_candidate(
-            db,
+        persist_candidate(
+            workspace,
             candidate_id=candidate_id,
             run_id=run_id,
             generation_id=generation_id,
@@ -1276,7 +1306,6 @@ def render_next_generation_group(
 
 
 def copy_survivor_carryover(
-    db: sqlite3.Connection,
     workspace: Path,
     *,
     run_id: str,
@@ -1303,8 +1332,8 @@ def copy_survivor_carryover(
             f"Copied survivor artifact hash does not match parent candidate {parent.id}."
         )
 
-    insert_candidate(
-        db,
+    persist_candidate(
+        workspace,
         candidate_id=candidate_id,
         run_id=run_id,
         generation_id=generation_id,
@@ -1362,6 +1391,40 @@ def checked_candidate_artifact_path(
             f"Parent candidate {parent.id} artifact hash does not match metadata."
         )
     return artifact_path
+
+
+def persist_candidate(
+    workspace: Path,
+    *,
+    candidate_id: str,
+    run_id: str,
+    generation_id: str,
+    generation_number: int,
+    position: int,
+    origin_type: str,
+    genome: dict[str, Any],
+    artifact_path: str | None,
+    byte_size: int | None,
+    sha256: str | None,
+    validation_status: str,
+    validation_message: str | None,
+) -> None:
+    with connect(workspace) as db:
+        insert_candidate(
+            db,
+            candidate_id=candidate_id,
+            run_id=run_id,
+            generation_id=generation_id,
+            generation_number=generation_number,
+            position=position,
+            origin_type=origin_type,
+            genome=genome,
+            artifact_path=artifact_path,
+            byte_size=byte_size,
+            sha256=sha256,
+            validation_status=validation_status,
+            validation_message=validation_message,
+        )
 
 
 def insert_candidate(

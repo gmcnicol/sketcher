@@ -1,4 +1,4 @@
-.PHONY: sketch webapp-dev webapp-build model-builder-test compose-config $(wordlist 2,$(words $(MAKECMDGOALS)),$(MAKECMDGOALS))
+.PHONY: sketch webapp-dev webapp-build model-builder-test compose-config compose-smoke $(wordlist 2,$(words $(MAKECMDGOALS)),$(MAKECMDGOALS))
 
 SKETCH_INPUT := $(word 2,$(MAKECMDGOALS))
 SKETCH_OUTPUT := $(word 3,$(MAKECMDGOALS))
@@ -23,6 +23,19 @@ model-builder-test:
 
 compose-config:
 	docker compose config
+
+compose-smoke:
+	docker compose up --build -d
+	@health_url="http://nuc:$${WEBAPP_PORT:-5174}/api/health"; \
+	for attempt in $$(seq 1 30); do \
+		response=$$(curl --fail --silent --show-error "$$health_url") && { echo "$$response"; break; }; \
+		if [ "$$attempt" -eq 30 ]; then \
+			echo "Health check failed: $$health_url"; \
+			exit 1; \
+		fi; \
+		sleep 1; \
+	done
+	docker compose ps
 
 $(wordlist 2,$(words $(MAKECMDGOALS)),$(MAKECMDGOALS)):
 	@:

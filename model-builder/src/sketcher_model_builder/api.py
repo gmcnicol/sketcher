@@ -24,6 +24,8 @@ from .generations import (
     create_next_generation,
     generation_summary_to_api,
     get_current_generation,
+    list_run_history,
+    run_history_to_api,
 )
 from .workspace import (
     UploadValidationError,
@@ -120,6 +122,10 @@ def create_app(workspace: Path | None = None) -> FastAPI:
                 "status": result.run.status,
             },
         }
+
+    @app.get("/runs")
+    def list_runs() -> dict[str, object]:
+        return {"runs": run_history_to_api(list_run_history(app.state.workspace))}
 
     @app.post("/runs/{run_id}/generations", status_code=status.HTTP_201_CREATED)
     def create_run_generation(run_id: str) -> dict[str, object]:

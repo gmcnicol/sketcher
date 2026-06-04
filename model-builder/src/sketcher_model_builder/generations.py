@@ -101,6 +101,8 @@ class CandidateSummary:
     sha256: str | None
     validation_status: str
     validation_message: str | None
+    parent_candidate_ids: list[str]
+    parent_generation_id: str | None
     created_at: str
 
 
@@ -113,6 +115,12 @@ class GenerationSummary:
     total_candidate_count: int
     ready_count: int
     failed_count: int
+    reviewed_count: int
+    survivor_count: int
+    rejected_count: int
+    low_diversity: bool
+    can_breed_next_generation: bool
+    can_reroll_generation: bool
     candidates: list[CandidateSummary]
     created_at: str
 
@@ -1443,6 +1451,7 @@ def insert_candidate(
     validation_status: str,
     validation_message: str | None,
 ) -> None:
+    created_at = utc_now()
     db.execute(
         """
         INSERT INTO candidates (
@@ -1475,9 +1484,62 @@ def insert_candidate(
             sha256,
             validation_status,
             validation_message,
-            utc_now(),
+            created_at,
         ),
     )
+    insert_candidate_parent_rows(
+        db,
+        candidate_id=candidate_id,
+        genome=genome,
+        created_at=created_at,
+    )
+
+
+def insert_candidate_parent_rows(
+    db: sqlite3.Connection,
+    *,
+    candidate_id: str,
+    genome: dict[str, Any],
+    created_at: str,
+) -> None:
+    parent_ids = genome.get("parentCandidateIds")
+    if not isinstance(parent_ids, list):
+        return
+    parent_generation_id = genome.get("parentGenerationId")
+    if not isinstance(parent_generation_id, str):
+        parent_generation_id = None
+
+    for index, parent_id in enumerate(parent_ids):
+        if not isinstance(parent_id, str) or not parent_id:
+            continue
+        resolved_parent_generation_id = parent_generation_id
+        if resolved_parent_generation_id is None:
+            parent = db.execute(
+                "SELECT generation_id FROM candidates WHERE id = ?",
+                (parent_id,),
+            ).fetchone()
+            if parent is None:
+                continue
+            resolved_parent_generation_id = parent["generation_id"]
+        db.execute(
+            """
+            INSERT INTO candidate_parents (
+                candidate_id,
+                parent_candidate_id,
+                parent_generation_id,
+                parent_index,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                candidate_id,
+                parent_id,
+                resolved_parent_generation_id,
+                index,
+                created_at,
+            ),
+        )
 
 
 def generation_summary_from_row(
@@ -1492,13 +1554,21 @@ def generation_summary_from_row(
         """,
         (generation["id"],),
     ).fetchall()
-    candidates = [candidate_summary_from_row(row) for row in rows]
+    parent_links = load_candidate_parent_links(db, [row["id"] for row in rows])
+    candidates = [
+        candidate_summary_from_row(row, parent_links.get(row["id"], []))
+        for row in rows
+    ]
     ready_count = sum(
         1 for candidate in candidates if candidate.validation_status == "ready"
     )
     failed_count = sum(
         1 for candidate in candidates if candidate.validation_status == "failed"
     )
+    review_counts = generation_review_counts(db, generation["id"])
+    reviewed_count = review_counts["survived"] + review_counts["rejected"]
+    review_complete = ready_count > 0 and reviewed_count >= ready_count
+    survivor_count = review_counts["survived"]
     return GenerationSummary(
         id=generation["id"],
         run_id=generation["run_id"],
@@ -1507,12 +1577,70 @@ def generation_summary_from_row(
         total_candidate_count=len(candidates),
         ready_count=ready_count,
         failed_count=failed_count,
+        reviewed_count=reviewed_count,
+        survivor_count=survivor_count,
+        rejected_count=review_counts["rejected"],
+        low_diversity=survivor_count in (1, 2),
+        can_breed_next_generation=review_complete and survivor_count > 0,
+        can_reroll_generation=review_complete and survivor_count == 0,
         candidates=candidates,
         created_at=generation["created_at"],
     )
 
 
-def candidate_summary_from_row(row: sqlite3.Row) -> CandidateSummary:
+def load_candidate_parent_links(
+    db: sqlite3.Connection,
+    candidate_ids: list[str],
+) -> dict[str, list[sqlite3.Row]]:
+    if not candidate_ids:
+        return {}
+    placeholders = ",".join("?" for _ in candidate_ids)
+    rows = db.execute(
+        f"""
+        SELECT * FROM candidate_parents
+        WHERE candidate_id IN ({placeholders})
+        ORDER BY candidate_id, parent_index
+        """,
+        candidate_ids,
+    ).fetchall()
+    links: dict[str, list[sqlite3.Row]] = {}
+    for row in rows:
+        links.setdefault(row["candidate_id"], []).append(row)
+    return links
+
+
+def generation_review_counts(
+    db: sqlite3.Connection,
+    generation_id: str,
+) -> dict[str, int]:
+    rows = db.execute(
+        """
+        SELECT candidate_decisions.decision, COUNT(*) AS count
+        FROM candidate_decisions
+        JOIN candidates
+          ON candidates.id = candidate_decisions.candidate_id
+         AND candidates.generation_id = candidate_decisions.generation_id
+        WHERE candidate_decisions.generation_id = ?
+          AND candidate_decisions.undone_at IS NULL
+          AND candidates.validation_status = 'ready'
+        GROUP BY candidate_decisions.decision
+        """,
+        (generation_id,),
+    ).fetchall()
+    counts = {"survived": 0, "rejected": 0}
+    for row in rows:
+        counts[row["decision"]] = row["count"]
+    return counts
+
+
+def candidate_summary_from_row(
+    row: sqlite3.Row,
+    parent_links: list[sqlite3.Row],
+) -> CandidateSummary:
+    parent_candidate_ids = [link["parent_candidate_id"] for link in parent_links]
+    parent_generation_id = (
+        parent_links[0]["parent_generation_id"] if parent_links else None
+    )
     return CandidateSummary(
         id=row["id"],
         run_id=row["run_id"],
@@ -1526,6 +1654,8 @@ def candidate_summary_from_row(row: sqlite3.Row) -> CandidateSummary:
         sha256=row["sha256"],
         validation_status=row["validation_status"],
         validation_message=row["validation_message"],
+        parent_candidate_ids=parent_candidate_ids,
+        parent_generation_id=parent_generation_id,
         created_at=row["created_at"],
     )
 
@@ -1539,6 +1669,12 @@ def generation_summary_to_api(summary: GenerationSummary) -> dict[str, Any]:
         "totalCandidateCount": summary.total_candidate_count,
         "readyCount": summary.ready_count,
         "failedCount": summary.failed_count,
+        "reviewedCount": summary.reviewed_count,
+        "survivorCount": summary.survivor_count,
+        "rejectedCount": summary.rejected_count,
+        "lowDiversity": summary.low_diversity,
+        "canBreedNextGeneration": summary.can_breed_next_generation,
+        "canRerollGeneration": summary.can_reroll_generation,
         "createdAt": summary.created_at,
         "candidates": [
             {
@@ -1554,6 +1690,8 @@ def generation_summary_to_api(summary: GenerationSummary) -> dict[str, Any]:
                 "sha256": candidate.sha256,
                 "validationStatus": candidate.validation_status,
                 "validationMessage": candidate.validation_message,
+                "parentCandidateIds": candidate.parent_candidate_ids,
+                "parentGenerationId": candidate.parent_generation_id,
                 "createdAt": candidate.created_at,
             }
             for candidate in summary.candidates

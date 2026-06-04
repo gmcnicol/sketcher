@@ -35,6 +35,9 @@ type CandidateSummary = {
   sha256: string | null
   validationStatus: string
   validationMessage: string | null
+  parentCandidateIds: string[]
+  parentGenerationId: string | null
+  createdAt: string
 }
 
 type GenerationSummary = {
@@ -45,6 +48,13 @@ type GenerationSummary = {
   totalCandidateCount: number
   readyCount: number
   failedCount: number
+  reviewedCount: number
+  survivorCount: number
+  rejectedCount: number
+  lowDiversity: boolean
+  canBreedNextGeneration: boolean
+  canRerollGeneration: boolean
+  createdAt: string
   candidates: CandidateSummary[]
 }
 

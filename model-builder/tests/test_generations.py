@@ -43,6 +43,17 @@ def fetch_rows(workspace: Path, table: str) -> list[sqlite3.Row]:
         return db.execute(f"SELECT * FROM {table} ORDER BY created_at, id").fetchall()
 
 
+def fetch_candidate_parent_rows(workspace: Path) -> list[sqlite3.Row]:
+    with sqlite3.connect(workspace / "sketcher.sqlite3") as db:
+        db.row_factory = sqlite3.Row
+        return db.execute(
+            """
+            SELECT * FROM candidate_parents
+            ORDER BY candidate_id, parent_index
+            """
+        ).fetchall()
+
+
 def install_fast_renderer(monkeypatch) -> None:
     def fake_render_candidate_svg(
         source_path: Path,
@@ -111,6 +122,12 @@ def test_generation_endpoint_creates_first_generation_with_24_ready_candidates(
     assert generation["totalCandidateCount"] == 24
     assert generation["readyCount"] == 24
     assert generation["failedCount"] == 0
+    assert generation["reviewedCount"] == 0
+    assert generation["survivorCount"] == 0
+    assert generation["rejectedCount"] == 0
+    assert generation["lowDiversity"] is False
+    assert generation["canBreedNextGeneration"] is False
+    assert generation["canRerollGeneration"] is False
     assert len(generation["candidates"]) == 24
 
     current_response = client.get(f"/runs/{run_id}/generations/current")
@@ -142,6 +159,13 @@ def test_generation_endpoint_creates_first_generation_with_24_ready_candidates(
         assert isinstance(genome["seed"], int)
         assert genome["renderParameters"]["seed"] == genome["seed"]
         assert genome["renderParameters"]["repeats"] >= generations.REPEATS_MIN
+
+    assert fetch_candidate_parent_rows(workspace) == []
+    assert all(
+        candidate["parentCandidateIds"] == []
+        and candidate["parentGenerationId"] is None
+        for candidate in generation["candidates"]
+    )
 
 
 def test_split_source_first_generation_uses_lower_retrace_counts(
@@ -524,6 +548,87 @@ def test_next_generation_requires_completed_review(tmp_path: Path, monkeypatch) 
     assert "review must be complete" in response.json()["detail"]
 
 
+def test_generation_summary_review_fields_follow_active_decisions(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    install_fast_renderer(monkeypatch)
+    workspace = tmp_path / "workspace"
+    client = TestClient(create_app(workspace))
+    run_id = upload_source(client)["run"]["id"]
+    generation = client.post(f"/runs/{run_id}/generations").json()["generation"]
+
+    initial = client.get(f"/runs/{run_id}/generations/current").json()["generation"]
+    assert initial["reviewedCount"] == 0
+    assert initial["survivorCount"] == 0
+    assert initial["rejectedCount"] == 0
+    assert initial["lowDiversity"] is False
+    assert initial["canBreedNextGeneration"] is False
+    assert initial["canRerollGeneration"] is False
+
+    response = client.post(
+        f"/runs/{run_id}/review/decisions",
+        json={"candidateId": generation["candidates"][0]["id"], "decision": "survived"},
+    )
+    assert response.status_code == 200
+    during_review = client.get(f"/runs/{run_id}/generations/current").json()[
+        "generation"
+    ]
+    assert during_review["reviewedCount"] == 1
+    assert during_review["survivorCount"] == 1
+    assert during_review["rejectedCount"] == 0
+    assert during_review["lowDiversity"] is True
+    assert during_review["canBreedNextGeneration"] is False
+    assert during_review["canRerollGeneration"] is False
+
+    undo_response = client.post(f"/runs/{run_id}/review/undo")
+    assert undo_response.status_code == 200
+    after_undo = client.get(f"/runs/{run_id}/generations/current").json()[
+        "generation"
+    ]
+    assert after_undo["reviewedCount"] == 0
+    assert after_undo["survivorCount"] == 0
+    assert after_undo["rejectedCount"] == 0
+    assert after_undo["lowDiversity"] is False
+    assert after_undo["canBreedNextGeneration"] is False
+    assert after_undo["canRerollGeneration"] is False
+
+
+@pytest.mark.parametrize(
+    ("survivor_count", "low_diversity", "can_breed", "can_reroll"),
+    [
+        (0, False, False, True),
+        (2, True, True, False),
+        (3, False, True, False),
+    ],
+)
+def test_completed_generation_summary_exposes_breeding_eligibility(
+    tmp_path: Path,
+    monkeypatch,
+    survivor_count: int,
+    low_diversity: bool,
+    can_breed: bool,
+    can_reroll: bool,
+) -> None:
+    install_fast_renderer(monkeypatch)
+    workspace = tmp_path / "workspace"
+    client = TestClient(create_app(workspace))
+    run_id = upload_source(client)["run"]["id"]
+    generation = client.post(f"/runs/{run_id}/generations").json()["generation"]
+    review_generation(client, run_id, generation["candidates"], survivor_count=survivor_count)
+
+    summary = client.get(f"/runs/{run_id}/generations/current").json()["generation"]
+
+    assert summary["readyCount"] == 24
+    assert summary["failedCount"] == 0
+    assert summary["reviewedCount"] == 24
+    assert summary["survivorCount"] == survivor_count
+    assert summary["rejectedCount"] == 24 - survivor_count
+    assert summary["lowDiversity"] is low_diversity
+    assert summary["canBreedNextGeneration"] is can_breed
+    assert summary["canRerollGeneration"] is can_reroll
+
+
 def test_zero_survivors_blocks_breed_and_allows_reroll(
     tmp_path: Path,
     monkeypatch,
@@ -557,6 +662,12 @@ def test_zero_survivors_blocks_breed_and_allows_reroll(
         candidate["genome"]["parentCandidateIds"] == []
         for candidate in next_generation["candidates"]
     )
+    assert all(
+        candidate["parentCandidateIds"] == []
+        and candidate["parentGenerationId"] is None
+        for candidate in next_generation["candidates"]
+    )
+    assert fetch_candidate_parent_rows(workspace) == []
 
 
 @pytest.mark.parametrize("survivor_count", [1, 2])
@@ -615,6 +726,71 @@ def test_normal_breed_creates_two_immigrants(tmp_path: Path, monkeypatch) -> Non
     assert len([c for c in ready_candidates if c["originType"] == "random_immigrant"]) == 2
     assert len([c for c in ready_candidates if c["originType"] == "survivor_carryover"]) == 5
     assert len([c for c in ready_candidates if c["originType"] == "survivor_mutation"]) == 17
+
+
+def test_breed_persists_and_exposes_candidate_parent_links(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    install_fast_renderer(monkeypatch)
+    workspace = tmp_path / "workspace"
+    client = TestClient(create_app(workspace))
+    run_id = upload_source(client)["run"]["id"]
+    generation = client.post(f"/runs/{run_id}/generations").json()["generation"]
+    review_generation(client, run_id, generation["candidates"], survivor_count=3)
+
+    next_generation = client.post(
+        f"/runs/{run_id}/generations/next",
+        json={"mode": "breed"},
+    ).json()["generation"]
+
+    survivors = generation["candidates"][:3]
+    parent_rows = fetch_candidate_parent_rows(workspace)
+    child_candidates = [
+        candidate
+        for candidate in next_generation["candidates"]
+        if candidate["originType"] in {"survivor_mutation", "survivor_carryover"}
+    ]
+    immigrants = [
+        candidate
+        for candidate in next_generation["candidates"]
+        if candidate["originType"] == "random_immigrant"
+    ]
+
+    assert len(parent_rows) == len(child_candidates)
+    assert all(
+        candidate["parentCandidateIds"] == []
+        and candidate["parentGenerationId"] is None
+        for candidate in immigrants
+    )
+    assert all(
+        len(candidate["parentCandidateIds"]) == 1
+        and candidate["parentGenerationId"] == generation["id"]
+        for candidate in child_candidates
+    )
+
+    mutation_parents = [
+        candidate["parentCandidateIds"][0]
+        for candidate in child_candidates
+        if candidate["originType"] == "survivor_mutation"
+    ]
+    carryover_parents = [
+        candidate["parentCandidateIds"][0]
+        for candidate in child_candidates
+        if candidate["originType"] == "survivor_carryover"
+    ]
+    assert mutation_parents == [
+        survivors[index % len(survivors)]["id"]
+        for index in range(len(mutation_parents))
+    ]
+    assert carryover_parents == [candidate["id"] for candidate in survivors]
+
+    parent_rows_by_candidate = {row["candidate_id"]: row for row in parent_rows}
+    for candidate in child_candidates:
+        row = parent_rows_by_candidate[candidate["id"]]
+        assert row["parent_candidate_id"] == candidate["parentCandidateIds"][0]
+        assert row["parent_generation_id"] == candidate["parentGenerationId"]
+        assert row["parent_index"] == 0
 
 
 def test_running_next_generation_is_visible_before_request_completes(

@@ -126,6 +126,18 @@ def review_generation(
     assert client.get(f"/runs/{run_id}/review/current").json()["review"]["complete"]
 
 
+def test_first_generation_genomes_include_flick_defaults() -> None:
+    genome = generations.build_first_generation_genome("run-1", 1)
+    render_parameters = genome["renderParameters"]
+
+    assert render_parameters["flick_strength"] == 0.45
+    assert render_parameters["flick_bias"] == "start"
+    assert render_parameters["flick_curve"] == "ease_out"
+    assert render_parameters["flick_probability"] == 0.65
+    assert render_parameters["flick_min_width"] == 0.08
+    assert render_parameters["flick_min_opacity"] == 0.04
+
+
 def test_generation_endpoint_creates_first_generation_with_24_ready_candidates(
     tmp_path: Path,
 ) -> None:
@@ -619,6 +631,42 @@ def test_dense_survivor_strokes_stay_visible_and_more_human() -> None:
     assert shade_mutation["shade_width"] >= generations.DENSE_SHADE_WIDTH_FLOOR
     assert shade_mutation["shade_opacity"] >= generations.DENSE_SHADE_OPACITY_FLOOR
     assert shade_mutation["roughness"] > parent_parameters["roughness"]
+
+
+def test_survivor_mutation_includes_mutable_flick_parameters() -> None:
+    parent_parameters = {
+        "repeats": 28,
+        "shade_strokes": 58,
+        "flick_strength": 0.45,
+        "flick_bias": "start",
+        "flick_curve": "ease_out",
+        "flick_probability": 0.65,
+        "flick_min_width": 0.08,
+        "flick_min_opacity": 0.04,
+    }
+
+    mutation = generations.mutate_render_parameters(
+        parent_parameters,
+        random.Random(9),
+    )
+
+    assert mutation["flick_bias"] in {"start", "end", "neutral"}
+    assert mutation["flick_curve"] in {"linear", "ease_in", "ease_out"}
+    assert 0 <= mutation["flick_strength"] <= 1
+    assert 0 <= mutation["flick_probability"] <= 1
+    assert mutation["flick_min_width"] > 0
+    assert 0 < mutation["flick_min_opacity"] <= 1
+    assert any(
+        mutation[key] != parent_parameters[key]
+        for key in (
+            "flick_strength",
+            "flick_bias",
+            "flick_curve",
+            "flick_probability",
+            "flick_min_width",
+            "flick_min_opacity",
+        )
+    )
 
 
 def test_next_generation_requires_completed_review(tmp_path: Path, monkeypatch) -> None:

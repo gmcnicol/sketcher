@@ -14,6 +14,7 @@ from pathlib import Path
 import uuid_utils
 
 from .generator import clean_svg_bytes_for_export
+from .split_trace import split_trace_svg_bytes
 
 
 SCHEMA_VERSION = 3
@@ -221,7 +222,12 @@ def store_source_upload(
     data: bytes,
 ) -> UploadResult:
     validate_svg_upload(filename, content_type, data)
-    clean_data = clean_svg_bytes_for_export(data)
+    try:
+        clean_data, _, _ = split_trace_svg_bytes(data)
+    except ET.ParseError as error:
+        raise UploadValidationError("Uploaded file must be valid SVG XML.") from error
+    if clean_data == data:
+        clean_data = clean_svg_bytes_for_export(data)
 
     workspace = ensure_workspace(workspace)
     source_id = new_uuid7()

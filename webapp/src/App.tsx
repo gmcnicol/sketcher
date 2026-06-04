@@ -1,5 +1,5 @@
 import type { FormEvent } from 'react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 
 type UploadSource = {
@@ -69,9 +69,10 @@ type ReviewResponse = {
 }
 
 type ReviewDecision = 'survived' | 'rejected'
+type NextGenerationMode = 'breed' | 'reroll'
 
 const apiBaseUrl =
-  import.meta.env.VITE_MODEL_BUILDER_URL ?? 'http://localhost:8000'
+  import.meta.env.VITE_MODEL_BUILDER_URL ?? '/api'
 
 function App() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
@@ -84,6 +85,11 @@ function App() {
   const [isUploading, setIsUploading] = useState(false)
   const [isGenerating, setIsGenerating] = useState(false)
   const [isReviewing, setIsReviewing] = useState(false)
+  const [loadedCandidateImageId, setLoadedCandidateImageId] = useState<string | null>(
+    null,
+  )
+  const generationActionInFlightRef = useRef(false)
+  const reviewActionInFlightRef = useRef(false)
 
   const selectedFileLabel = useMemo(() => {
     if (!selectedFile) {
@@ -92,6 +98,9 @@ function App() {
 
     return `${selectedFile.name} (${formatByteSize(selectedFile.size)})`
   }, [selectedFile])
+  const currentCandidate = review?.currentCandidate ?? null
+  const candidateImageLoaded =
+    currentCandidate !== null && loadedCandidateImageId === currentCandidate.id
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -138,10 +147,11 @@ function App() {
   }
 
   async function handleGenerateCandidates() {
-    if (!result) {
+    if (generationActionInFlightRef.current || !result) {
       return
     }
 
+    generationActionInFlightRef.current = true
     setIsGenerating(true)
     setGenerationError(null)
 
@@ -169,6 +179,7 @@ function App() {
       )
     } finally {
       setIsGenerating(false)
+      generationActionInFlightRef.current = false
     }
   }
 
@@ -185,10 +196,18 @@ function App() {
 
   const submitReviewDecision = useCallback(
     async (decision: ReviewDecision) => {
-      if (isReviewing || !result || !review?.currentCandidate || review.complete) {
+      if (
+        reviewActionInFlightRef.current ||
+        isReviewing ||
+        !candidateImageLoaded ||
+        !result ||
+        !review?.currentCandidate ||
+        review.complete
+      ) {
         return
       }
 
+      reviewActionInFlightRef.current = true
       setIsReviewing(true)
       setReviewError(null)
 
@@ -219,16 +238,24 @@ function App() {
         )
       } finally {
         setIsReviewing(false)
+        reviewActionInFlightRef.current = false
       }
     },
-    [isReviewing, result, review],
+    [candidateImageLoaded, isReviewing, result, review],
   )
 
   const undoReviewDecision = useCallback(async () => {
-    if (isReviewing || !result || !review || review.reviewedCount === 0) {
+    if (
+      reviewActionInFlightRef.current ||
+      isReviewing ||
+      !result ||
+      !review ||
+      review.reviewedCount === 0
+    ) {
       return
     }
 
+    reviewActionInFlightRef.current = true
     setIsReviewing(true)
     setReviewError(null)
 
@@ -250,8 +277,57 @@ function App() {
       )
     } finally {
       setIsReviewing(false)
+      reviewActionInFlightRef.current = false
     }
   }, [isReviewing, result, review])
+
+  const createNextGeneration = useCallback(
+    async (mode: NextGenerationMode) => {
+      if (
+        generationActionInFlightRef.current ||
+        isGenerating ||
+        !result ||
+        !review?.complete
+      ) {
+        return
+      }
+
+      generationActionInFlightRef.current = true
+      setIsGenerating(true)
+      setReviewError(null)
+      setGenerationError(null)
+
+      try {
+        const response = await fetch(
+          `${apiBaseUrl}/runs/${result.run.id}/generations/next`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mode }),
+          },
+        )
+        const body = await response.json().catch(() => null)
+
+        if (!response.ok) {
+          throw new Error(body?.detail ?? 'Next generation failed.')
+        }
+
+        const generationBody = body as GenerationResponse
+        setGeneration(generationBody.generation)
+        await fetchReview(result.run.id)
+      } catch (nextGenerationError) {
+        setReviewError(
+          nextGenerationError instanceof Error
+            ? nextGenerationError.message
+            : 'Next generation failed unexpectedly.',
+        )
+      } finally {
+        setIsGenerating(false)
+        generationActionInFlightRef.current = false
+      }
+    },
+    [fetchReview, isGenerating, result, review],
+  )
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -269,14 +345,19 @@ function App() {
       } else if (key === 'u') {
         event.preventDefault()
         void undoReviewDecision()
+      } else if (
+        key === 'b' &&
+        review?.complete &&
+        review.survivorCount > 0
+      ) {
+        event.preventDefault()
+        void createNextGeneration('breed')
       }
     }
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [submitReviewDecision, undoReviewDecision])
-
-  const currentCandidate = review?.currentCandidate ?? null
+  }, [createNextGeneration, review, submitReviewDecision, undoReviewDecision])
 
   return (
     <main className="app-shell">
@@ -366,10 +447,17 @@ function App() {
             review={review}
             candidate={currentCandidate}
             isReviewing={isReviewing}
+            isGenerating={isGenerating}
+            candidateImageLoaded={candidateImageLoaded}
             reviewError={reviewError}
             onSurvive={() => void submitReviewDecision('survived')}
             onReject={() => void submitReviewDecision('rejected')}
             onUndo={() => void undoReviewDecision()}
+            onNextGeneration={(mode) => void createNextGeneration(mode)}
+            onCandidateImageLoad={(candidateId) =>
+              setLoadedCandidateImageId(candidateId)
+            }
+            onCandidateImageError={() => setLoadedCandidateImageId(null)}
           />
         ) : null}
       </section>
@@ -382,10 +470,15 @@ type ReviewDeckProps = {
   review: ReviewState | null
   candidate: CandidateSummary | null
   isReviewing: boolean
+  isGenerating: boolean
+  candidateImageLoaded: boolean
   reviewError: string | null
   onSurvive: () => void
   onReject: () => void
   onUndo: () => void
+  onNextGeneration: (mode: NextGenerationMode) => void
+  onCandidateImageLoad: (candidateId: string) => void
+  onCandidateImageError: () => void
 }
 
 function ReviewDeck({
@@ -393,10 +486,15 @@ function ReviewDeck({
   review,
   candidate,
   isReviewing,
+  isGenerating,
+  candidateImageLoaded,
   reviewError,
   onSurvive,
   onReject,
   onUndo,
+  onNextGeneration,
+  onCandidateImageLoad,
+  onCandidateImageError,
 }: ReviewDeckProps) {
   if (!review) {
     return (
@@ -407,6 +505,10 @@ function ReviewDeck({
   }
 
   if (review.complete) {
+    const hasSurvivors = review.survivorCount > 0
+    const hasLowDiversity = review.survivorCount > 0 && review.survivorCount <= 2
+    const isBusy = isReviewing || isGenerating
+
     return (
       <section className="review-deck" aria-label="Review complete">
         <div className="review-complete">
@@ -417,14 +519,44 @@ function ReviewDeck({
             <span>{review.survivorCount} survived</span>
             <span>{review.rejectedCount} rejected</span>
           </div>
-          <button
-            className="secondary-action"
-            type="button"
-            onClick={onUndo}
-            disabled={isReviewing || review.reviewedCount === 0}
-          >
-            Undo (u)
-          </button>
+          {hasLowDiversity ? (
+            <p className="review-note">
+              Low survivor diversity. The next generation will include extra fresh
+              candidates.
+            </p>
+          ) : null}
+          {!hasSurvivors ? (
+            <p className="review-note">
+              No survivors remain. Reroll the next generation with fresh candidates.
+            </p>
+          ) : null}
+          <div className="review-complete-actions">
+            {hasSurvivors ? (
+              <button
+                type="button"
+                onClick={() => onNextGeneration('breed')}
+                disabled={isBusy}
+              >
+                {isGenerating ? 'Breeding...' : 'Breed next generation (b)'}
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => onNextGeneration('reroll')}
+                disabled={isBusy}
+              >
+                {isGenerating ? 'Rerolling...' : 'Reroll generation'}
+              </button>
+            )}
+            <button
+              className="secondary-action"
+              type="button"
+              onClick={onUndo}
+              disabled={isBusy || review.reviewedCount === 0}
+            >
+              Undo (u)
+            </button>
+          </div>
           {reviewError ? (
             <div className="status status-error" role="alert">
               <span>Review error</span>
@@ -446,6 +578,8 @@ function ReviewDeck({
     )
   }
 
+  const reviewActionsDisabled = isReviewing || !candidateImageLoaded
+
   return (
     <section className="review-deck" aria-label="Review candidates">
       <div className="review-header">
@@ -466,6 +600,8 @@ function ReviewDeck({
           key={candidate.id}
           src={`${apiBaseUrl}/candidates/${encodeURIComponent(candidate.id)}/artifact`}
           alt={`Candidate ${review.currentIndex} artifact`}
+          onLoad={() => onCandidateImageLoad(candidate.id)}
+          onError={onCandidateImageError}
         />
       </div>
 
@@ -485,14 +621,14 @@ function ReviewDeck({
       </div>
 
       <div className="review-actions" aria-label="Review actions">
-        <button type="button" onClick={onSurvive} disabled={isReviewing}>
+        <button type="button" onClick={onSurvive} disabled={reviewActionsDisabled}>
           Survive (j)
         </button>
         <button
           className="reject-action"
           type="button"
           onClick={onReject}
-          disabled={isReviewing}
+          disabled={reviewActionsDisabled}
         >
           Reject (k)
         </button>

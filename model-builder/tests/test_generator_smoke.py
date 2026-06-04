@@ -1,6 +1,16 @@
+import random
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
 from pathlib import Path
+
+from sketcher_model_builder.generator import (
+    human_stroke_routes_for_pass,
+    order_routes_by_nearest_endpoint,
+    render_sketch_svg,
+    route_axis,
+    stroke_routes_from_path_d,
+)
 
 
 def test_generator_writes_svg(tmp_path: Path) -> None:
@@ -36,3 +46,125 @@ def test_generator_writes_svg(tmp_path: Path) -> None:
     assert "width=" not in output
     assert "height=" not in output
     assert "viewBox=" in output
+
+
+def test_stroke_mode_keeps_scanned_subpaths_separate(tmp_path: Path) -> None:
+    input_svg = tmp_path / "source.svg"
+    output_svg = tmp_path / "out.svg"
+    input_svg.write_text(
+        """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120">
+  <path id="scan" d="M 0 0 L 10 0 M 100 100 L 110 100" style="fill:none;stroke:#000;stroke-width:1" />
+</svg>
+""",
+        encoding="utf-8",
+    )
+
+    routes = stroke_routes_from_path_d("M 0 0 L 10 0 M 100 100 L 110 100")
+    assert routes == [[(0.0, 0.0), (10.0, 0.0)], [(100.0, 100.0), (110.0, 100.0)]]
+
+    render_sketch_svg(
+        input_svg,
+        output_svg,
+        mode="stroke",
+        repeats=1,
+        shade_strokes=0,
+        jitter=0,
+        roughness=0,
+        seed=1,
+    )
+
+    root = ET.parse(output_svg).getroot()
+    sketch_paths = [
+        element
+        for element in root.iter()
+        if element.get("data-sketcher-pass") == "1"
+    ]
+    assert len(sketch_paths) == 1
+    rendered_d = sketch_paths[0].get("d", "")
+    assert rendered_d.count("M") == 2
+    assert "100 100" in rendered_d
+
+
+def test_fill_mode_preserves_scanned_stroke_subpaths(tmp_path: Path) -> None:
+    input_svg = tmp_path / "source.svg"
+    output_svg = tmp_path / "out.svg"
+    input_svg.write_text(
+        """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120">
+  <path id="scan" d="M 0 0 L 10 0 M 100 100 L 110 100" style="fill:none;stroke:#000;stroke-width:1" />
+</svg>
+""",
+        encoding="utf-8",
+    )
+
+    render_sketch_svg(
+        input_svg,
+        output_svg,
+        mode="fill",
+        repeats=1,
+        shade_strokes=8,
+        jitter=0,
+        roughness=0,
+        seed=1,
+    )
+
+    root = ET.parse(output_svg).getroot()
+    sketch_paths = [
+        element
+        for element in root.iter()
+        if element.get("data-sketcher-pass") == "1"
+    ]
+    fill_paths = [
+        element
+        for element in root.iter()
+        if element.get("data-sketcher-flow-pass")
+        or element.get("data-sketcher-pressure-pass")
+        or element.get("data-sketcher-vertical-flow-pass")
+    ]
+
+    assert len(sketch_paths) == 1
+    assert sketch_paths[0].get("d", "").count("M") == 2
+    assert fill_paths == []
+
+
+def test_stroke_routes_can_be_ordered_by_nearest_endpoint() -> None:
+    first = [(0.0, 0.0), (10.0, 0.0)]
+    far = [(100.0, 100.0), (110.0, 100.0)]
+    near_reversed = [(22.0, 0.0), (12.0, 0.0)]
+
+    ordered = order_routes_by_nearest_endpoint(
+        [first, far, near_reversed],
+        distance_weight=1.0,
+    )
+
+    assert ordered == [first, near_reversed, far]
+
+    source_ordered = order_routes_by_nearest_endpoint(
+        [first, far, near_reversed],
+        distance_weight=0.0,
+    )
+    assert source_ordered == [first, far, near_reversed]
+
+
+def test_stroke_route_axis_uses_larger_span() -> None:
+    assert route_axis([(0.0, 0.0), (0.0, 20.0), (4.0, 22.0)]) == "vertical"
+    assert route_axis([(0.0, 0.0), (20.0, 0.0), (22.0, 4.0)]) == "horizontal"
+
+
+def test_stroke_passes_can_draw_mutable_fragments_in_source_direction() -> None:
+    route = [(0.0, 0.0), (20.0, 0.0), (40.0, 0.0), (60.0, 0.0)]
+
+    fragments = human_stroke_routes_for_pass(
+        [route],
+        random.Random(3),
+        1,
+        fragment_min=0.2,
+        fragment_max=0.45,
+        fragment_probability=1.0,
+        full_retrace_interval=0,
+    )
+
+    assert len(fragments) == 1
+    fragment = fragments[0]
+    assert route[0] != fragment[0]
+    assert route[-1] != fragment[-1]
+    assert fragment[0][0] < fragment[-1][0]

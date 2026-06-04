@@ -1,4 +1,4 @@
-"""First-generation candidate creation and persistence."""
+"""Candidate generation creation and persistence."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import random
+import shutil
 import sqlite3
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -24,6 +25,24 @@ from .workspace import connect, ensure_workspace, new_uuid7, utc_now
 
 FIRST_GENERATION_SIZE = 24
 MAX_FIRST_GENERATION_ATTEMPTS = 72
+NEXT_GENERATION_SIZE = 24
+MAX_NEXT_GENERATION_ATTEMPTS = 96
+MAX_SURVIVOR_CARRYOVERS = 8
+REPEATS_MIN = 100
+REPEATS_MAX = 3000
+REPEATS_MUTATION_DELTA = 3000
+SPLIT_SOURCE_REPEATS_MIN = 4
+SPLIT_SOURCE_REPEATS_MAX = 24
+SPLIT_SOURCE_REPEATS_MUTATION_DELTA = 8
+SHADE_STROKES_MIN = 0
+SHADE_STROKES_MAX = 3000
+SHADE_STROKES_MUTATION_DELTA = 3000
+DENSE_REPEATS_BASELINE = 60
+DENSE_SHADE_STROKES_BASELINE = 90
+DENSE_STROKE_WIDTH_FLOOR = 0.095
+DENSE_STROKE_OPACITY_FLOOR = 0.058
+DENSE_SHADE_WIDTH_FLOOR = 0.22
+DENSE_SHADE_OPACITY_FLOOR = 0.07
 SKETCH_PATH_MARKERS = {
     "data-sketcher-pass",
     "data-sketcher-flow-pass",
@@ -50,6 +69,22 @@ class MissingGenerationError(GenerationError):
 
 class SourceArtifactError(GenerationError):
     """Raised when a run source cannot be used for generation."""
+
+
+class ReviewNotCompleteError(GenerationError):
+    """Raised when next generation creation is requested before review completion."""
+
+
+class NoSurvivorsError(GenerationError):
+    """Raised when breeding is requested without active survivors."""
+
+
+class RerollNotAllowedError(GenerationError):
+    """Raised when rerolling is requested with active survivors."""
+
+
+class CandidateArtifactLineageError(GenerationError):
+    """Raised when a parent candidate artifact cannot be safely copied."""
 
 
 @dataclass(frozen=True)
@@ -88,6 +123,20 @@ class SourceContext:
     source_id: str
     source_path: Path
     source_bounds: tuple[float, float, float, float]
+    substroke_count: int
+
+
+@dataclass(frozen=True)
+class ParentCandidate:
+    id: str
+    generation_id: str
+    generation_number: int
+    position: int
+    origin_type: str
+    genome: dict[str, Any]
+    artifact_path: str
+    byte_size: int
+    sha256: str
 
 
 def create_first_generation(workspace: Path, run_id: str) -> GenerationSummary:
@@ -116,7 +165,11 @@ def create_first_generation(workspace: Path, run_id: str) -> GenerationSummary:
                 break
 
             candidate_id = new_uuid7()
-            genome = build_first_generation_genome(run_id, attempt)
+            genome = build_first_generation_genome(
+                run_id,
+                attempt,
+                source_substroke_count=source_context.substroke_count,
+            )
             artifact_relative_path = candidate_artifact_path(
                 run_id=run_id,
                 generation_id=generation_id,
@@ -178,6 +231,114 @@ def create_first_generation(workspace: Path, run_id: str) -> GenerationSummary:
     return get_current_generation(workspace, run_id)
 
 
+def create_next_generation(
+    workspace: Path,
+    run_id: str,
+    *,
+    mode: str,
+) -> GenerationSummary:
+    workspace = ensure_workspace(workspace)
+    if mode not in {"breed", "reroll"}:
+        raise GenerationError("Next generation mode must be breed or reroll.")
+
+    with connect(workspace) as db:
+        source_context = load_source_context(db, workspace, run_id)
+        previous_generation = load_current_generation_row(db, run_id)
+        ready_count, reviewed_count = review_completion_counts(db, previous_generation["id"])
+        if not ready_count or reviewed_count < ready_count:
+            raise ReviewNotCompleteError(
+                "Current generation review must be complete before creating the next generation."
+            )
+
+        survivors = load_active_survivors(db, previous_generation["id"])
+        if mode == "breed" and not survivors:
+            raise NoSurvivorsError(
+                "Breed next generation requires at least one survivor. Reroll this generation instead."
+            )
+        if mode == "reroll" and survivors:
+            raise RerollNotAllowedError(
+                "Reroll is only available when the completed generation has zero survivors."
+            )
+
+    generation_id = new_uuid7()
+    generation_number = previous_generation["generation_number"] + 1
+    created_at = utc_now()
+    carryovers = survivors[:MAX_SURVIVOR_CARRYOVERS] if mode == "breed" else []
+    immigrant_target = next_generation_immigrant_target(len(survivors), mode)
+    mutation_target = NEXT_GENERATION_SIZE - immigrant_target - len(carryovers)
+
+    with connect(workspace) as db:
+        db.execute(
+            """
+            INSERT INTO generations (id, run_id, generation_number, status, created_at)
+            VALUES (?, ?, ?, 'running', ?)
+            """,
+            (generation_id, run_id, generation_number, created_at),
+        )
+
+        position = 1
+        ready_count = 0
+        mutation_ready_count, position = render_next_generation_group(
+            db,
+            workspace,
+            source_context=source_context,
+            run_id=run_id,
+            generation_id=generation_id,
+            generation_number=generation_number,
+            starting_position=position,
+            target_ready_count=mutation_target,
+            origin_type="survivor_mutation",
+            genome_builder=lambda slot: build_survivor_mutation_genome(
+                run_id=run_id,
+                generation_number=generation_number,
+                slot=slot,
+                parent=survivors[(slot - 1) % len(survivors)],
+                source_substroke_count=source_context.substroke_count,
+            ),
+        )
+        ready_count += mutation_ready_count
+
+        immigrant_ready_count, position = render_next_generation_group(
+            db,
+            workspace,
+            source_context=source_context,
+            run_id=run_id,
+            generation_id=generation_id,
+            generation_number=generation_number,
+            starting_position=position,
+            target_ready_count=immigrant_target,
+            origin_type="random_immigrant",
+            genome_builder=lambda slot: build_random_immigrant_genome(
+                run_id=run_id,
+                generation_number=generation_number,
+                slot=slot,
+                source_substroke_count=source_context.substroke_count,
+            ),
+        )
+        ready_count += immigrant_ready_count
+
+        for parent in carryovers:
+            copy_survivor_carryover(
+                db,
+                workspace,
+                run_id=run_id,
+                generation_id=generation_id,
+                generation_number=generation_number,
+                position=position,
+                parent=parent,
+            )
+            position += 1
+            ready_count += 1
+
+        status = "ready" if ready_count == NEXT_GENERATION_SIZE else "partial_failed"
+        db.execute(
+            "UPDATE generations SET status = ? WHERE id = ?",
+            (status, generation_id),
+        )
+
+    return get_current_generation(workspace, run_id)
+
+
 def get_current_generation(workspace: Path, run_id: str) -> GenerationSummary:
     workspace = ensure_workspace(workspace)
     with connect(workspace) as db:
@@ -198,6 +359,29 @@ def get_current_generation(workspace: Path, run_id: str) -> GenerationSummary:
             raise MissingGenerationError(f"Run {run_id} does not have a generation yet.")
 
         return generation_summary_from_row(db, generation)
+
+
+def load_current_generation_row(
+    db: sqlite3.Connection,
+    run_id: str,
+) -> sqlite3.Row:
+    run = db.execute("SELECT id FROM runs WHERE id = ?", (run_id,)).fetchone()
+    if run is None:
+        raise UnknownRunError(f"Run {run_id} was not found.")
+
+    generation = db.execute(
+        """
+        SELECT * FROM generations
+        WHERE run_id = ?
+        ORDER BY generation_number DESC
+        LIMIT 1
+        """,
+        (run_id,),
+    ).fetchone()
+    if generation is None:
+        raise MissingGenerationError(f"Run {run_id} does not have a generation yet.")
+
+    return generation
 
 
 def load_source_context(
@@ -235,6 +419,7 @@ def load_source_context(
 
     try:
         source_bounds = source_svg_bounds(source_path)
+        substroke_count = source_substroke_count(source_path)
     except (ET.ParseError, ValueError) as error:
         raise SourceArtifactError(
             f"Run source artifact is not a renderable SVG: {error}"
@@ -245,6 +430,7 @@ def load_source_context(
         source_id=row["source_id"],
         source_path=source_path,
         source_bounds=source_bounds,
+        substroke_count=substroke_count,
     )
 
 
@@ -256,6 +442,63 @@ def generation_exists(db: sqlite3.Connection, run_id: str) -> bool:
         ).fetchone()
         is not None
     )
+
+
+def review_completion_counts(
+    db: sqlite3.Connection,
+    generation_id: str,
+) -> tuple[int, int]:
+    ready_count = db.execute(
+        """
+        SELECT COUNT(*) AS count FROM candidates
+        WHERE generation_id = ?
+          AND validation_status = 'ready'
+        """,
+        (generation_id,),
+    ).fetchone()["count"]
+    reviewed_count = db.execute(
+        """
+        SELECT COUNT(*) AS count FROM candidate_decisions
+        WHERE generation_id = ?
+          AND undone_at IS NULL
+        """,
+        (generation_id,),
+    ).fetchone()["count"]
+    return ready_count, reviewed_count
+
+
+def load_active_survivors(
+    db: sqlite3.Connection,
+    generation_id: str,
+) -> list[ParentCandidate]:
+    rows = db.execute(
+        """
+        SELECT candidates.* FROM candidates
+        JOIN candidate_decisions
+          ON candidate_decisions.candidate_id = candidates.id
+         AND candidate_decisions.generation_id = candidates.generation_id
+         AND candidate_decisions.undone_at IS NULL
+         AND candidate_decisions.decision = 'survived'
+        WHERE candidates.generation_id = ?
+          AND candidates.validation_status = 'ready'
+        ORDER BY candidates.position
+        """,
+        (generation_id,),
+    ).fetchall()
+    return [
+        ParentCandidate(
+            id=row["id"],
+            generation_id=row["generation_id"],
+            generation_number=row["generation_number"],
+            position=row["position"],
+            origin_type=row["origin_type"],
+            genome=json.loads(row["genome_json"]),
+            artifact_path=row["artifact_path"],
+            byte_size=row["byte_size"],
+            sha256=row["sha256"],
+        )
+        for row in rows
+    ]
 
 
 def source_svg_bounds(source_path: Path) -> tuple[float, float, float, float]:
@@ -279,7 +522,21 @@ def source_svg_bounds(source_path: Path) -> tuple[float, float, float, float]:
     return combine_bounds(path_bounds)
 
 
-def build_first_generation_genome(run_id: str, attempt: int) -> dict[str, Any]:
+def source_substroke_count(source_path: Path) -> int:
+    root = ET.parse(source_path).getroot()
+    return sum(
+        1
+        for element in root.iter()
+        if element.get("data-sketcher-substroke") is not None
+    )
+
+
+def build_first_generation_genome(
+    run_id: str,
+    attempt: int,
+    *,
+    source_substroke_count: int = 0,
+) -> dict[str, Any]:
     presets = [
         (
             "outline_retrace",
@@ -289,10 +546,16 @@ def build_first_generation_genome(run_id: str, attempt: int) -> dict[str, Any]:
                 "shade_strokes": 0,
                 "jitter": 0.08,
                 "roughness": 0.38,
-                "stroke_width": 0.22,
-                "opacity": 0.075,
+                "stroke_width": 0.32,
+                "opacity": 0.13,
                 "shade_width": 0.8,
                 "shade_opacity": 0.08,
+                "stroke_fragment_min": 0.22,
+                "stroke_fragment_max": 0.95,
+                "stroke_fragment_probability": 0.82,
+                "pressure_variance": 0.5,
+                "strength_variance": 0.42,
+                "full_retrace_interval": 11,
             },
         ),
         (
@@ -303,10 +566,16 @@ def build_first_generation_genome(run_id: str, attempt: int) -> dict[str, Any]:
                 "shade_strokes": 58,
                 "jitter": 0.07,
                 "roughness": 0.42,
-                "stroke_width": 0.2,
-                "opacity": 0.06,
+                "stroke_width": 0.3,
+                "opacity": 0.11,
                 "shade_width": 1.15,
-                "shade_opacity": 0.14,
+                "shade_opacity": 0.18,
+                "stroke_fragment_min": 0.12,
+                "stroke_fragment_max": 0.76,
+                "stroke_fragment_probability": 0.62,
+                "pressure_variance": 0.68,
+                "strength_variance": 0.58,
+                "full_retrace_interval": 17,
             },
         ),
         (
@@ -317,10 +586,16 @@ def build_first_generation_genome(run_id: str, attempt: int) -> dict[str, Any]:
                 "shade_strokes": 18,
                 "jitter": 0.05,
                 "roughness": 0.62,
-                "stroke_width": 0.17,
-                "opacity": 0.052,
+                "stroke_width": 0.28,
+                "opacity": 0.1,
                 "shade_width": 1.45,
-                "shade_opacity": 0.18,
+                "shade_opacity": 0.22,
+                "stroke_fragment_min": 0.08,
+                "stroke_fragment_max": 0.58,
+                "stroke_fragment_probability": 0.48,
+                "pressure_variance": 0.82,
+                "strength_variance": 0.72,
+                "full_retrace_interval": 0,
             },
         ),
     ]
@@ -329,20 +604,52 @@ def build_first_generation_genome(run_id: str, attempt: int) -> dict[str, Any]:
     rng = random.Random(seed)
 
     render_parameters = dict(base_parameters)
+    repeats_min, repeats_max, _ = repeat_limits_for_source(source_substroke_count)
     render_parameters.update(
         {
             "seed": seed,
             "keep_original": False,
             "stroke": "#111111",
+            "stroke_order_distance_weight": 1.0,
+            "stroke_fragment_min": clamp_float(
+                render_parameters["stroke_fragment_min"] * rng.uniform(0.65, 1.4),
+                0.04,
+                0.45,
+            ),
+            "stroke_fragment_max": clamp_float(
+                render_parameters["stroke_fragment_max"] * rng.uniform(0.75, 1.25),
+                0.35,
+                1.0,
+            ),
+            "stroke_fragment_probability": clamp_float(
+                render_parameters["stroke_fragment_probability"] * rng.uniform(0.72, 1.28),
+                0.18,
+                0.98,
+            ),
+            "pressure_variance": clamp_float(
+                render_parameters["pressure_variance"] * rng.uniform(0.7, 1.35),
+                0.12,
+                1.25,
+            ),
+            "strength_variance": clamp_float(
+                render_parameters["strength_variance"] * rng.uniform(0.7, 1.35),
+                0.12,
+                1.0,
+            ),
+            "full_retrace_interval": clamp_int(
+                render_parameters["full_retrace_interval"] + rng.randint(-3, 4),
+                0,
+                28,
+            ),
             "repeats": clamp_int(
                 render_parameters["repeats"] + rng.randint(-4, 5),
-                2,
-                44,
+                repeats_min,
+                repeats_max,
             ),
             "shade_strokes": clamp_int(
                 render_parameters["shade_strokes"] + rng.randint(-10, 14),
-                0,
-                90,
+                SHADE_STROKES_MIN,
+                SHADE_STROKES_MAX,
             ),
             "jitter": clamp_float(
                 render_parameters["jitter"] * rng.uniform(0.65, 1.65),
@@ -356,13 +663,13 @@ def build_first_generation_genome(run_id: str, attempt: int) -> dict[str, Any]:
             ),
             "stroke_width": clamp_float(
                 render_parameters["stroke_width"] * rng.uniform(0.65, 1.6),
-                0.08,
+                0.12,
                 0.52,
             ),
             "opacity": clamp_float(
                 render_parameters["opacity"] * rng.uniform(0.75, 1.4),
-                0.025,
-                0.16,
+                0.07,
+                0.22,
             ),
             "shade_width": clamp_float(
                 render_parameters["shade_width"] * rng.uniform(0.7, 1.55),
@@ -371,25 +678,384 @@ def build_first_generation_genome(run_id: str, attempt: int) -> dict[str, Any]:
             ),
             "shade_opacity": clamp_float(
                 render_parameters["shade_opacity"] * rng.uniform(0.65, 1.45),
-                0.04,
+                0.07,
                 0.32,
             ),
         }
     )
+    if render_parameters["stroke_fragment_min"] > render_parameters["stroke_fragment_max"]:
+        render_parameters["stroke_fragment_min"] = render_parameters["stroke_fragment_max"]
+    render_parameters = humanize_dense_strokes(render_parameters)
 
     return {
         "schemaVersion": 1,
         "strategyFamily": family,
         "seed": seed,
+        "parentCandidateIds": [],
+        "parentGenerationId": None,
+        "generationNumber": 1,
+        "lineageKind": "preset_mutation",
         "presetIndex": (attempt - 1) % len(presets),
         "mutationAttempt": attempt,
         "renderParameters": render_parameters,
     }
 
 
+def build_random_immigrant_genome(
+    *,
+    run_id: str,
+    generation_number: int,
+    slot: int,
+    source_substroke_count: int = 0,
+) -> dict[str, Any]:
+    genome = build_first_generation_genome(
+        f"{run_id}:generation:{generation_number}:random_immigrant",
+        slot,
+        source_substroke_count=source_substroke_count,
+    )
+    seed = lineage_seed(
+        run_id=run_id,
+        generation_number=generation_number,
+        slot=slot,
+        origin_type="random_immigrant",
+    )
+    render_parameters = dict(genome["renderParameters"])
+    render_parameters["seed"] = seed
+    genome.update(
+        {
+            "seed": seed,
+            "parentCandidateIds": [],
+            "parentGenerationId": None,
+            "generationNumber": generation_number,
+            "lineageKind": "random_immigrant",
+            "immigrantSlot": slot,
+            "renderParameters": render_parameters,
+        }
+    )
+    return genome
+
+
+def build_survivor_mutation_genome(
+    *,
+    run_id: str,
+    generation_number: int,
+    slot: int,
+    parent: ParentCandidate,
+    source_substroke_count: int = 0,
+) -> dict[str, Any]:
+    seed = lineage_seed(
+        run_id=run_id,
+        generation_number=generation_number,
+        slot=slot,
+        origin_type="survivor_mutation",
+        parent_id=parent.id,
+    )
+    rng = random.Random(seed)
+    parent_parameters = dict(parent.genome.get("renderParameters", {}))
+    render_parameters = mutate_render_parameters(
+        parent_parameters,
+        rng,
+        source_substroke_count=source_substroke_count,
+    )
+    render_parameters.update(
+        {
+            "seed": seed,
+            "mode": parent_parameters.get("mode", "auto"),
+            "stroke": parent_parameters.get("stroke", "#111111"),
+            "keep_original": bool(parent_parameters.get("keep_original", False)),
+        }
+    )
+
+    return {
+        "schemaVersion": 1,
+        "strategyFamily": parent.genome.get("strategyFamily", "survivor_mutation"),
+        "seed": seed,
+        "parentCandidateIds": [parent.id],
+        "parentGenerationId": parent.generation_id,
+        "generationNumber": generation_number,
+        "lineageKind": "survivor_mutation",
+        "parentPosition": parent.position,
+        "mutationSlot": slot,
+        "renderParameters": render_parameters,
+    }
+
+
+def build_survivor_carryover_genome(
+    *,
+    run_id: str,
+    generation_number: int,
+    position: int,
+    parent: ParentCandidate,
+) -> dict[str, Any]:
+    seed = lineage_seed(
+        run_id=run_id,
+        generation_number=generation_number,
+        slot=position,
+        origin_type="survivor_carryover",
+        parent_id=parent.id,
+    )
+    render_parameters = dict(parent.genome.get("renderParameters", {}))
+    render_parameters["seed"] = seed
+    return {
+        "schemaVersion": 1,
+        "strategyFamily": parent.genome.get("strategyFamily", "survivor_carryover"),
+        "seed": seed,
+        "parentCandidateIds": [parent.id],
+        "parentGenerationId": parent.generation_id,
+        "generationNumber": generation_number,
+        "lineageKind": "survivor_carryover",
+        "parentPosition": parent.position,
+        "renderParameters": render_parameters,
+    }
+
+
+def mutate_render_parameters(
+    parent_parameters: dict[str, Any],
+    rng: random.Random,
+    *,
+    source_substroke_count: int = 0,
+) -> dict[str, Any]:
+    repeats_min, repeats_max, repeats_delta = repeat_limits_for_source(
+        source_substroke_count
+    )
+    render_parameters = {
+        "mode": parent_parameters.get("mode", "auto"),
+        "repeats": mutate_int_parameter(
+            parent_parameters.get("repeats", 24),
+            rng,
+            minimum=repeats_min,
+            maximum=repeats_max,
+            delta=repeats_delta,
+        ),
+        "shade_strokes": mutate_int_parameter(
+            parent_parameters.get("shade_strokes", 24),
+            rng,
+            minimum=SHADE_STROKES_MIN,
+            maximum=SHADE_STROKES_MAX,
+            delta=SHADE_STROKES_MUTATION_DELTA,
+        ),
+        "jitter": mutate_float_parameter(
+            parent_parameters.get("jitter", 0.08),
+            rng,
+            minimum=0.02,
+            maximum=0.22,
+            variance=0.18,
+        ),
+        "roughness": mutate_float_parameter(
+            parent_parameters.get("roughness", 0.45),
+            rng,
+            minimum=0.04,
+            maximum=0.95,
+            variance=0.16,
+        ),
+        "stroke_width": mutate_float_parameter(
+            parent_parameters.get("stroke_width", 0.22),
+            rng,
+            minimum=0.12,
+            maximum=0.52,
+            variance=0.16,
+        ),
+        "opacity": mutate_float_parameter(
+            parent_parameters.get("opacity", 0.075),
+            rng,
+            minimum=0.07,
+            maximum=0.22,
+            variance=0.14,
+        ),
+        "shade_width": mutate_float_parameter(
+            parent_parameters.get("shade_width", 1.1),
+            rng,
+            minimum=0.45,
+            maximum=2.4,
+            variance=0.16,
+        ),
+        "shade_opacity": mutate_float_parameter(
+            parent_parameters.get("shade_opacity", 0.14),
+            rng,
+            minimum=0.07,
+            maximum=0.32,
+            variance=0.14,
+        ),
+        "stroke": parent_parameters.get("stroke", "#111111"),
+        "stroke_order_distance_weight": mutate_float_parameter(
+            parent_parameters.get("stroke_order_distance_weight", 1.0),
+            rng,
+            minimum=0.0,
+            maximum=2.0,
+            variance=0.35,
+        ),
+        "stroke_fragment_min": mutate_float_parameter(
+            parent_parameters.get("stroke_fragment_min", 0.16),
+            rng,
+            minimum=0.04,
+            maximum=0.45,
+            variance=0.32,
+        ),
+        "stroke_fragment_max": mutate_float_parameter(
+            parent_parameters.get("stroke_fragment_max", 0.82),
+            rng,
+            minimum=0.35,
+            maximum=1.0,
+            variance=0.24,
+        ),
+        "stroke_fragment_probability": mutate_float_parameter(
+            parent_parameters.get("stroke_fragment_probability", 0.7),
+            rng,
+            minimum=0.18,
+            maximum=0.98,
+            variance=0.3,
+        ),
+        "pressure_variance": mutate_float_parameter(
+            parent_parameters.get("pressure_variance", 0.48),
+            rng,
+            minimum=0.12,
+            maximum=1.25,
+            variance=0.32,
+        ),
+        "strength_variance": mutate_float_parameter(
+            parent_parameters.get("strength_variance", 0.45),
+            rng,
+            minimum=0.12,
+            maximum=1.0,
+            variance=0.32,
+        ),
+        "full_retrace_interval": mutate_int_parameter(
+            parent_parameters.get("full_retrace_interval", 13),
+            rng,
+            minimum=0,
+            maximum=28,
+            delta=6,
+        ),
+        "keep_original": bool(parent_parameters.get("keep_original", False)),
+    }
+    if render_parameters["stroke_fragment_min"] > render_parameters["stroke_fragment_max"]:
+        render_parameters["stroke_fragment_min"] = render_parameters["stroke_fragment_max"]
+    return humanize_dense_strokes(render_parameters)
+
+
+def repeat_limits_for_source(source_substroke_count: int) -> tuple[int, int, int]:
+    if source_substroke_count > 0:
+        return (
+            SPLIT_SOURCE_REPEATS_MIN,
+            SPLIT_SOURCE_REPEATS_MAX,
+            SPLIT_SOURCE_REPEATS_MUTATION_DELTA,
+        )
+    return REPEATS_MIN, REPEATS_MAX, REPEATS_MUTATION_DELTA
+
+
+def humanize_dense_strokes(render_parameters: dict[str, Any]) -> dict[str, Any]:
+    repeats = int(render_parameters["repeats"])
+    shade_strokes = int(render_parameters["shade_strokes"])
+
+    retrace_scale = density_scale(repeats, DENSE_REPEATS_BASELINE)
+    shade_scale = density_scale(shade_strokes, DENSE_SHADE_STROKES_BASELINE)
+
+    render_parameters = dict(render_parameters)
+    render_parameters.update(
+        {
+            "stroke_width": clamp_float(
+                float(render_parameters["stroke_width"]) * retrace_scale,
+                DENSE_STROKE_WIDTH_FLOOR,
+                0.52,
+            ),
+            "opacity": clamp_float(
+                scale_density_opacity(float(render_parameters["opacity"]), retrace_scale),
+                DENSE_STROKE_OPACITY_FLOOR,
+                0.22,
+            ),
+            "shade_width": clamp_float(
+                float(render_parameters["shade_width"]) * shade_scale,
+                DENSE_SHADE_WIDTH_FLOOR,
+                2.4,
+            ),
+            "shade_opacity": clamp_float(
+                scale_density_opacity(float(render_parameters["shade_opacity"]), shade_scale),
+                DENSE_SHADE_OPACITY_FLOOR,
+                0.32,
+            ),
+            "jitter": clamp_float(
+                float(render_parameters["jitter"]) * (1 + (1 - retrace_scale) * 0.35),
+                0.02,
+                0.3,
+            ),
+            "roughness": clamp_float(
+                float(render_parameters["roughness"])
+                * (1 + (1 - min(retrace_scale, shade_scale)) * 0.3),
+                0.04,
+                1.15,
+            ),
+        }
+    )
+    return render_parameters
+
+
+def density_scale(count: int, baseline: int) -> float:
+    if count <= baseline:
+        return 1.0
+    return math.sqrt(baseline / count)
+
+
+def scale_density_opacity(opacity: float, density_scale_value: float) -> float:
+    return opacity * math.sqrt(density_scale_value)
+
+
+def mutate_int_parameter(
+    value: Any,
+    rng: random.Random,
+    *,
+    minimum: int,
+    maximum: int,
+    delta: int,
+) -> int:
+    try:
+        numeric_value = int(value)
+    except (TypeError, ValueError):
+        numeric_value = minimum
+    return clamp_int(numeric_value + rng.randint(-delta, delta), minimum, maximum)
+
+
+def mutate_float_parameter(
+    value: Any,
+    rng: random.Random,
+    *,
+    minimum: float,
+    maximum: float,
+    variance: float,
+) -> float:
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError):
+        numeric_value = minimum
+    factor = 1 + rng.uniform(-variance, variance)
+    return clamp_float(numeric_value * factor, minimum, maximum)
+
+
 def candidate_seed(run_id: str, attempt: int) -> int:
     digest = hashlib.sha256(f"{run_id}:{attempt}".encode("utf-8")).digest()
     return int.from_bytes(digest[:8], "big", signed=False)
+
+
+def lineage_seed(
+    *,
+    run_id: str,
+    generation_number: int,
+    slot: int,
+    origin_type: str,
+    parent_id: str | None = None,
+) -> int:
+    parts = [run_id, str(generation_number), str(slot), origin_type]
+    if parent_id is not None:
+        parts.append(parent_id)
+    digest = hashlib.sha256(":".join(parts).encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big", signed=False)
+
+
+def next_generation_immigrant_target(survivor_count: int, mode: str) -> int:
+    if mode == "reroll":
+        return NEXT_GENERATION_SIZE
+    if survivor_count <= 2:
+        return 4
+    return 2
 
 
 def clamp_int(value: int, minimum: int, maximum: int) -> int:
@@ -530,6 +1196,172 @@ def bounds_are_obviously_out_of_bounds(
         or abs(candidate_center_x - source_center_x) > source_width * 25
         or abs(candidate_center_y - source_center_y) > source_height * 25
     )
+
+
+def render_next_generation_group(
+    db: sqlite3.Connection,
+    workspace: Path,
+    *,
+    source_context: SourceContext,
+    run_id: str,
+    generation_id: str,
+    generation_number: int,
+    starting_position: int,
+    target_ready_count: int,
+    origin_type: str,
+    genome_builder: Any,
+) -> tuple[int, int]:
+    ready_count = 0
+    position = starting_position
+    attempts = 0
+    while ready_count < target_ready_count and attempts < MAX_NEXT_GENERATION_ATTEMPTS:
+        attempts += 1
+        slot = attempts
+        candidate_id = new_uuid7()
+        genome = genome_builder(slot)
+        artifact_relative_path = candidate_artifact_path(
+            run_id=run_id,
+            generation_id=generation_id,
+            position=position,
+            candidate_id=candidate_id,
+        )
+        artifact_path = workspace / artifact_relative_path
+        validation_status = "ready"
+        validation_message: str | None = None
+        byte_size: int | None = None
+        sha256: str | None = None
+
+        try:
+            render_candidate_svg(
+                source_context.source_path,
+                artifact_path,
+                genome["renderParameters"],
+            )
+            validation_message = validate_candidate_svg(
+                artifact_path,
+                source_context.source_bounds,
+            )
+            data = artifact_path.read_bytes()
+            byte_size = len(data)
+            sha256 = hashlib.sha256(data).hexdigest()
+            ready_count += 1
+        except Exception as error:
+            validation_status = "failed"
+            validation_message = str(error) or error.__class__.__name__
+            if artifact_path.exists():
+                data = artifact_path.read_bytes()
+                byte_size = len(data)
+                sha256 = hashlib.sha256(data).hexdigest()
+
+        insert_candidate(
+            db,
+            candidate_id=candidate_id,
+            run_id=run_id,
+            generation_id=generation_id,
+            generation_number=generation_number,
+            position=position,
+            origin_type=origin_type,
+            genome=genome,
+            artifact_path=artifact_relative_path.as_posix()
+            if artifact_path.exists()
+            else None,
+            byte_size=byte_size,
+            sha256=sha256,
+            validation_status=validation_status,
+            validation_message=validation_message,
+        )
+        position += 1
+
+    return ready_count, position
+
+
+def copy_survivor_carryover(
+    db: sqlite3.Connection,
+    workspace: Path,
+    *,
+    run_id: str,
+    generation_id: str,
+    generation_number: int,
+    position: int,
+    parent: ParentCandidate,
+) -> None:
+    source_path = checked_candidate_artifact_path(workspace, parent)
+    candidate_id = new_uuid7()
+    artifact_relative_path = candidate_artifact_path(
+        run_id=run_id,
+        generation_id=generation_id,
+        position=position,
+        candidate_id=candidate_id,
+    )
+    artifact_path = workspace / artifact_relative_path
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source_path, artifact_path)
+    data = artifact_path.read_bytes()
+    sha256 = hashlib.sha256(data).hexdigest()
+    if sha256 != parent.sha256:
+        raise CandidateArtifactLineageError(
+            f"Copied survivor artifact hash does not match parent candidate {parent.id}."
+        )
+
+    insert_candidate(
+        db,
+        candidate_id=candidate_id,
+        run_id=run_id,
+        generation_id=generation_id,
+        generation_number=generation_number,
+        position=position,
+        origin_type="survivor_carryover",
+        genome=build_survivor_carryover_genome(
+            run_id=run_id,
+            generation_number=generation_number,
+            position=position,
+            parent=parent,
+        ),
+        artifact_path=artifact_relative_path.as_posix(),
+        byte_size=len(data),
+        sha256=sha256,
+        validation_status="ready",
+        validation_message="Survivor artifact carried over from previous generation.",
+    )
+
+
+def checked_candidate_artifact_path(
+    workspace: Path,
+    parent: ParentCandidate,
+) -> Path:
+    relative_path = Path(parent.artifact_path)
+    if (
+        relative_path.is_absolute()
+        or ".." in relative_path.parts
+        or relative_path.parts[:2] != ("artifacts", "candidates")
+    ):
+        raise CandidateArtifactLineageError(
+            f"Parent candidate {parent.id} artifact path is not workspace-relative."
+        )
+
+    candidate_root = (workspace / "artifacts" / "candidates").resolve()
+    artifact_path = (workspace / relative_path).resolve()
+    try:
+        artifact_path.relative_to(candidate_root)
+    except ValueError as error:
+        raise CandidateArtifactLineageError(
+            f"Parent candidate {parent.id} artifact path points outside candidate artifacts."
+        ) from error
+
+    if not artifact_path.exists() or not artifact_path.is_file():
+        raise CandidateArtifactLineageError(
+            f"Parent candidate {parent.id} artifact is missing."
+        )
+    data = artifact_path.read_bytes()
+    if len(data) != parent.byte_size:
+        raise CandidateArtifactLineageError(
+            f"Parent candidate {parent.id} artifact byte size does not match metadata."
+        )
+    if hashlib.sha256(data).hexdigest() != parent.sha256:
+        raise CandidateArtifactLineageError(
+            f"Parent candidate {parent.id} artifact hash does not match metadata."
+        )
+    return artifact_path
 
 
 def insert_candidate(

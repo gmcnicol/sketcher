@@ -12,11 +12,16 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from .generations import (
+    CandidateArtifactLineageError,
     DuplicateGenerationError,
     MissingGenerationError,
+    NoSurvivorsError,
+    RerollNotAllowedError,
+    ReviewNotCompleteError,
     SourceArtifactError,
     UnknownRunError,
     create_first_generation,
+    create_next_generation,
     generation_summary_to_api,
     get_current_generation,
 )
@@ -46,6 +51,10 @@ from .review import (
 class ReviewDecisionRequest(BaseModel):
     candidateId: str
     decision: Literal["survived", "rejected"]
+
+
+class NextGenerationRequest(BaseModel):
+    mode: Literal["breed", "reroll"]
 
 
 def configured_cors_origins() -> list[str]:
@@ -126,6 +135,42 @@ def create_app(workspace: Path | None = None) -> FastAPI:
                 detail=str(error),
             ) from error
         except SourceArtifactError as error:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(error),
+            ) from error
+
+        return {"generation": generation_summary_to_api(summary)}
+
+    @app.post(
+        "/runs/{run_id}/generations/next",
+        status_code=status.HTTP_201_CREATED,
+    )
+    def create_run_next_generation(
+        run_id: str,
+        request: NextGenerationRequest,
+    ) -> dict[str, object]:
+        try:
+            summary = create_next_generation(
+                app.state.workspace,
+                run_id,
+                mode=request.mode,
+            )
+        except (UnknownRunError, MissingGenerationError) as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=str(error),
+            ) from error
+        except (
+            ReviewNotCompleteError,
+            NoSurvivorsError,
+            RerollNotAllowedError,
+        ) as error:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(error),
+            ) from error
+        except (SourceArtifactError, CandidateArtifactLineageError) as error:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=str(error),

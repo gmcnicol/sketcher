@@ -9,7 +9,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from .generations import MissingGenerationError, UnknownRunError
+from .generations import (
+    MissingGenerationError,
+    UnknownRunError,
+    load_candidate_parent_links,
+)
 from .workspace import connect, ensure_workspace, new_uuid7, utc_now
 
 
@@ -66,6 +70,8 @@ class ReviewCandidate:
     sha256: str
     validation_status: str
     validation_message: str | None
+    parent_candidate_ids: list[str]
+    parent_generation_id: str | None
     created_at: str
 
 
@@ -302,7 +308,14 @@ def review_state_from_db(
         """,
         (generation["id"],),
     ).fetchall()
-    candidates = [review_candidate_from_row(row) for row in candidate_rows]
+    parent_links = load_candidate_parent_links(
+        db,
+        [row["id"] for row in candidate_rows],
+    )
+    candidates = [
+        review_candidate_from_row(row, parent_links.get(row["id"], []))
+        for row in candidate_rows
+    ]
 
     active_rows = db.execute(
         """
@@ -348,7 +361,14 @@ def review_state_from_db(
     )
 
 
-def review_candidate_from_row(row: sqlite3.Row) -> ReviewCandidate:
+def review_candidate_from_row(
+    row: sqlite3.Row,
+    parent_links: list[sqlite3.Row],
+) -> ReviewCandidate:
+    parent_candidate_ids = [link["parent_candidate_id"] for link in parent_links]
+    parent_generation_id = (
+        parent_links[0]["parent_generation_id"] if parent_links else None
+    )
     return ReviewCandidate(
         id=row["id"],
         run_id=row["run_id"],
@@ -362,6 +382,8 @@ def review_candidate_from_row(row: sqlite3.Row) -> ReviewCandidate:
         sha256=row["sha256"],
         validation_status=row["validation_status"],
         validation_message=row["validation_message"],
+        parent_candidate_ids=parent_candidate_ids,
+        parent_generation_id=parent_generation_id,
         created_at=row["created_at"],
     )
 
@@ -397,5 +419,7 @@ def review_candidate_to_api(candidate: ReviewCandidate) -> dict[str, Any]:
         "sha256": candidate.sha256,
         "validationStatus": candidate.validation_status,
         "validationMessage": candidate.validation_message,
+        "parentCandidateIds": candidate.parent_candidate_ids,
+        "parentGenerationId": candidate.parent_generation_id,
         "createdAt": candidate.created_at,
     }

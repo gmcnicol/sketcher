@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import sqlite3
@@ -17,7 +18,7 @@ from .generator import clean_svg_bytes_for_export
 from .split_trace import split_trace_svg_bytes
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 ALLOWED_SVG_CONTENT_TYPES = {"image/svg+xml"}
 
 
@@ -149,6 +150,33 @@ def ensure_workspace(workspace: Path) -> Path:
         )
         db.execute(
             """
+            CREATE TABLE IF NOT EXISTS candidate_parents (
+                candidate_id TEXT NOT NULL,
+                parent_candidate_id TEXT NOT NULL,
+                parent_generation_id TEXT,
+                parent_index INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (candidate_id, parent_index),
+                FOREIGN KEY (candidate_id) REFERENCES candidates(id),
+                FOREIGN KEY (parent_candidate_id) REFERENCES candidates(id),
+                FOREIGN KEY (parent_generation_id) REFERENCES generations(id)
+            )
+            """
+        )
+        db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_candidate_parents_candidate
+            ON candidate_parents (candidate_id, parent_index)
+            """
+        )
+        db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_candidate_parents_parent
+            ON candidate_parents (parent_candidate_id, parent_generation_id)
+            """
+        )
+        db.execute(
+            """
             CREATE TABLE IF NOT EXISTS candidate_decisions (
                 id TEXT PRIMARY KEY,
                 run_id TEXT NOT NULL,
@@ -169,6 +197,12 @@ def ensure_workspace(workspace: Path) -> Path:
             ON candidate_decisions (generation_id, candidate_id, undone_at, created_at)
             """
         )
+        stored_version = db.execute(
+            "SELECT value FROM workspace_meta WHERE key = 'schema_version'"
+        ).fetchone()
+        version = int(stored_version["value"]) if stored_version is not None else 0
+        if version < 4:
+            migrate_to_v4(db)
         db.execute(
             """
             INSERT INTO workspace_meta (key, value)
@@ -186,6 +220,61 @@ def ensure_workspace(workspace: Path) -> Path:
             (utc_now(),),
         )
     return workspace
+
+
+def migrate_to_v4(db: sqlite3.Connection) -> None:
+    """Backfill queryable candidate lineage from v3 genome JSON."""
+
+    rows = db.execute(
+        """
+        SELECT id, genome_json, created_at FROM candidates
+        ORDER BY created_at, id
+        """
+    ).fetchall()
+    for row in rows:
+        try:
+            genome = json.loads(row["genome_json"])
+        except json.JSONDecodeError:
+            continue
+
+        parent_ids = genome.get("parentCandidateIds")
+        if not isinstance(parent_ids, list):
+            continue
+        parent_generation_id = genome.get("parentGenerationId")
+        if not isinstance(parent_generation_id, str):
+            parent_generation_id = None
+
+        for index, parent_id in enumerate(parent_ids):
+            if not isinstance(parent_id, str) or not parent_id:
+                continue
+            parent = db.execute(
+                "SELECT generation_id FROM candidates WHERE id = ?",
+                (parent_id,),
+            ).fetchone()
+            if parent is None:
+                continue
+            resolved_parent_generation_id = parent_generation_id
+            if resolved_parent_generation_id is None:
+                resolved_parent_generation_id = parent["generation_id"]
+            db.execute(
+                """
+                INSERT OR IGNORE INTO candidate_parents (
+                    candidate_id,
+                    parent_candidate_id,
+                    parent_generation_id,
+                    parent_index,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    row["id"],
+                    parent_id,
+                    resolved_parent_generation_id,
+                    index,
+                    row["created_at"],
+                ),
+            )
 
 
 def connect(workspace: Path) -> sqlite3.Connection:

@@ -1,4 +1,5 @@
 import hashlib
+import json
 import sqlite3
 import xml.etree.ElementTree as ET
 import uuid
@@ -55,7 +56,174 @@ def test_workspace_initialization_creates_directories_and_database(tmp_path: Pat
             "SELECT value FROM workspace_meta WHERE key = 'schema_version'"
         ).fetchone()[0]
 
-    assert schema_version == "3"
+    assert schema_version == "4"
+
+
+def test_fresh_workspace_creates_candidate_parent_table_and_indexes(
+    tmp_path: Path,
+) -> None:
+    workspace = ensure_workspace(tmp_path / "workspace")
+
+    with sqlite3.connect(workspace / "sketcher.sqlite3") as db:
+        db.row_factory = sqlite3.Row
+        objects = db.execute(
+            """
+            SELECT name, type FROM sqlite_master
+            WHERE name IN (
+                'candidate_parents',
+                'idx_candidate_parents_candidate',
+                'idx_candidate_parents_parent'
+            )
+            """
+        ).fetchall()
+
+    assert {(row["name"], row["type"]) for row in objects} == {
+        ("candidate_parents", "table"),
+        ("idx_candidate_parents_candidate", "index"),
+        ("idx_candidate_parents_parent", "index"),
+    }
+
+
+def test_v3_workspace_migrates_to_v4_and_backfills_candidate_parents(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    db_path = workspace / "sketcher.sqlite3"
+    with sqlite3.connect(db_path) as db:
+        db.execute(
+            "CREATE TABLE workspace_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        db.execute(
+            """
+            CREATE TABLE generations (
+                id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                generation_number INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        db.execute(
+            """
+            CREATE TABLE candidates (
+                id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                generation_id TEXT NOT NULL,
+                generation_number INTEGER NOT NULL,
+                position INTEGER NOT NULL,
+                origin_type TEXT NOT NULL,
+                genome_json TEXT NOT NULL,
+                artifact_path TEXT,
+                byte_size INTEGER,
+                sha256 TEXT,
+                validation_status TEXT NOT NULL,
+                validation_message TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        db.execute(
+            "INSERT INTO workspace_meta (key, value) VALUES ('schema_version', '3')"
+        )
+        db.execute(
+            """
+            INSERT INTO generations (id, run_id, generation_number, status, created_at)
+            VALUES ('gen-1', 'run-1', 1, 'ready', '2026-01-01T00:00:00+00:00')
+            """
+        )
+        db.execute(
+            """
+            INSERT INTO generations (id, run_id, generation_number, status, created_at)
+            VALUES ('gen-2', 'run-1', 2, 'ready', '2026-01-02T00:00:00+00:00')
+            """
+        )
+        db.execute(
+            """
+            INSERT INTO candidates (
+                id,
+                run_id,
+                generation_id,
+                generation_number,
+                position,
+                origin_type,
+                genome_json,
+                artifact_path,
+                byte_size,
+                sha256,
+                validation_status,
+                validation_message,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, 'ready', NULL, ?)
+            """,
+            (
+                "parent-1",
+                "run-1",
+                "gen-1",
+                1,
+                1,
+                "preset_mutation",
+                json.dumps({"parentCandidateIds": [], "parentGenerationId": None}),
+                "2026-01-01T00:00:01+00:00",
+            ),
+        )
+        db.execute(
+            """
+            INSERT INTO candidates (
+                id,
+                run_id,
+                generation_id,
+                generation_number,
+                position,
+                origin_type,
+                genome_json,
+                artifact_path,
+                byte_size,
+                sha256,
+                validation_status,
+                validation_message,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, 'ready', NULL, ?)
+            """,
+            (
+                "child-1",
+                "run-1",
+                "gen-2",
+                2,
+                1,
+                "survivor_mutation",
+                json.dumps(
+                    {
+                        "parentCandidateIds": ["parent-1"],
+                        "parentGenerationId": "gen-1",
+                    }
+                ),
+                "2026-01-02T00:00:01+00:00",
+            ),
+        )
+
+    ensure_workspace(workspace)
+
+    with sqlite3.connect(db_path) as db:
+        db.row_factory = sqlite3.Row
+        schema_version = db.execute(
+            "SELECT value FROM workspace_meta WHERE key = 'schema_version'"
+        ).fetchone()[0]
+        parent_rows = db.execute("SELECT * FROM candidate_parents").fetchall()
+
+    assert schema_version == "4"
+    assert [dict(row) for row in parent_rows] == [
+        {
+            "candidate_id": "child-1",
+            "parent_candidate_id": "parent-1",
+            "parent_generation_id": "gen-1",
+            "parent_index": 0,
+            "created_at": "2026-01-02T00:00:01+00:00",
+        }
+    ]
 
 
 def test_valid_svg_upload_creates_source_run_and_artifact(tmp_path: Path) -> None:

@@ -20,6 +20,7 @@ from .split_trace import split_trace_svg_bytes
 
 SCHEMA_VERSION = 4
 ALLOWED_SVG_CONTENT_TYPES = {"image/svg+xml"}
+_INITIALIZED_WORKSPACES: set[Path] = set()
 
 
 class UploadValidationError(ValueError):
@@ -68,14 +69,20 @@ def new_uuid7() -> str:
 
 def ensure_workspace(workspace: Path) -> Path:
     workspace = workspace.expanduser().resolve()
+    if workspace in _INITIALIZED_WORKSPACES:
+        return workspace
+
     for directory in (
         workspace / "artifacts" / "sources",
         workspace / "artifacts" / "candidates",
+        workspace / "artifacts" / "thumbnails",
         workspace / "models",
     ):
         directory.mkdir(parents=True, exist_ok=True)
 
     with connect(workspace) as db:
+        db.execute("PRAGMA journal_mode = WAL")
+        db.execute("PRAGMA synchronous = NORMAL")
         db.execute(
             """
             CREATE TABLE IF NOT EXISTS workspace_meta (
@@ -219,6 +226,7 @@ def ensure_workspace(workspace: Path) -> Path:
             """,
             (utc_now(),),
         )
+    _INITIALIZED_WORKSPACES.add(workspace)
     return workspace
 
 
@@ -278,10 +286,10 @@ def migrate_to_v4(db: sqlite3.Connection) -> None:
 
 
 def connect(workspace: Path) -> sqlite3.Connection:
-    connection = sqlite3.connect(workspace / "sketcher.sqlite3")
+    connection = sqlite3.connect(workspace / "sketcher.sqlite3", timeout=30)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
-    connection.execute("PRAGMA busy_timeout = 5000")
+    connection.execute("PRAGMA busy_timeout = 30000")
     return connection
 
 

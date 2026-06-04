@@ -6,6 +6,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from sketcher_model_builder import generations
+from sketcher_model_builder import review as review_module
 from sketcher_model_builder.api import create_app
 
 
@@ -271,6 +272,73 @@ def test_candidate_artifact_endpoint_serves_ready_svg(tmp_path: Path) -> None:
     assert response.headers["content-type"].startswith("image/svg+xml")
     assert response.headers["x-content-sha256"] == candidate["sha256"]
     assert hashlib.sha256(response.content).hexdigest() == candidate["sha256"]
+
+
+def test_candidate_thumbnail_endpoint_serves_cached_png(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    client = TestClient(create_app(workspace))
+    run_id = upload_source(client)["run"]["id"]
+    candidate = create_generation(client, run_id)["candidates"][0]
+    render_calls: list[dict] = []
+
+    def fake_render_candidate_svg(
+        source_path: Path,
+        artifact_path: Path,
+        render_parameters: dict,
+    ) -> None:
+        render_calls.append(
+            {
+                "source_path": source_path,
+                "artifact_path": artifact_path,
+                "render_parameters": render_parameters,
+            }
+        )
+        artifact_path.write_text(
+            """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">
+  <path d="M 1 1 L 9 9" />
+</svg>
+""",
+            encoding="utf-8",
+        )
+
+    def fake_svg2png(
+        *,
+        url: str,
+        write_to: str,
+        output_width: int,
+        output_height: int,
+    ) -> None:
+        assert Path(url) != workspace / candidate["artifactPath"]
+        assert Path(url).name.endswith(".tmp.svg")
+        assert output_width == 256
+        assert output_height == 256
+        Path(write_to).write_bytes(b"\x89PNG\r\n\x1a\ncached")
+
+    monkeypatch.setattr(review_module, "render_candidate_svg", fake_render_candidate_svg)
+    monkeypatch.setattr(review_module.cairosvg, "svg2png", fake_svg2png)
+
+    first_response = client.get(f"/candidates/{candidate['id']}/thumbnail.png")
+    second_response = client.get(f"/candidates/{candidate['id']}/thumbnail.png")
+
+    assert first_response.status_code == 200
+    assert first_response.headers["content-type"].startswith("image/png")
+    assert first_response.content.startswith(b"\x89PNG\r\n\x1a\n")
+    assert second_response.content == first_response.content
+    assert second_response.headers["x-content-sha256"] == first_response.headers[
+        "x-content-sha256"
+    ]
+
+    cached_thumbnails = list((workspace / "artifacts" / "thumbnails").glob("*.png"))
+    assert len(cached_thumbnails) == 1
+    assert len(render_calls) == 1
+    assert render_calls[0]["source_path"].parts[-2] == "sources"
+    assert render_calls[0]["render_parameters"]["repeats"] == 3
+    assert render_calls[0]["render_parameters"]["shade_strokes"] == 0
+    assert render_calls[0]["render_parameters"]["full_retrace_interval"] == 0
+    assert render_calls[0]["render_parameters"]["flick_probability"] == 0
 
 
 def test_candidate_artifact_endpoint_rejects_missing_artifacts(

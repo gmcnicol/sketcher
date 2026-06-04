@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, File, HTTPException, UploadFile, status
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -45,6 +45,7 @@ from .review import (
     UnknownCandidateError,
     get_current_review_state,
     load_candidate_artifact,
+    load_candidate_thumbnail,
     record_candidate_decision,
     review_state_to_api,
     undo_latest_decision,
@@ -290,6 +291,34 @@ def create_app(workspace: Path | None = None) -> FastAPI:
             artifact.path,
             media_type="image/svg+xml",
             headers={"X-Content-SHA256": artifact.sha256},
+        )
+
+    @app.get("/candidates/{candidate_id}/thumbnail.png")
+    def get_candidate_thumbnail(
+        candidate_id: str,
+        size: int = Query(default=256, ge=64, le=1024),
+    ) -> FileResponse:
+        try:
+            thumbnail = load_candidate_thumbnail(
+                app.state.workspace,
+                candidate_id,
+                size=size,
+            )
+        except UnknownCandidateError as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=str(error),
+            ) from error
+        except CandidateArtifactError as error:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(error),
+            ) from error
+
+        return FileResponse(
+            thumbnail.path,
+            media_type="image/png",
+            headers={"X-Content-SHA256": thumbnail.sha256},
         )
 
     return app

@@ -96,11 +96,14 @@ type ReviewResponse = {
 type ReviewDecision = 'survived' | 'rejected'
 type NextGenerationMode = 'breed' | 'reroll'
 type TerminalGenerationStatus = 'ready' | 'partial_failed'
+type AppSection = 'generation' | 'history'
 
 const apiBaseUrl =
   import.meta.env.VITE_MODEL_BUILDER_URL ?? '/api'
 const generationReadyTarget = 24
 const generationPollIntervalMs = 1000
+const thumbnailSize = 256
+const reviewImageSize = 1024
 
 function App() {
   const prefersReducedMotion = useReducedMotion()
@@ -114,6 +117,7 @@ function App() {
   const [historyError, setHistoryError] = useState<string | null>(null)
   const [runHistory, setRunHistory] = useState<RunHistoryEntry[]>([])
   const [isLoadingHistory, setIsLoadingHistory] = useState(false)
+  const [activeSection, setActiveSection] = useState<AppSection>('generation')
   const [isUploading, setIsUploading] = useState(false)
   const [isGenerating, setIsGenerating] = useState(false)
   const [isReviewing, setIsReviewing] = useState(false)
@@ -149,6 +153,41 @@ function App() {
     isTerminalGenerationStatus(generation.status) &&
     generation.readyCount > 0 &&
     !generationRequestInFlight
+
+  const updateGenerationReviewState = useCallback(
+    (
+      nextReview: ReviewState,
+      candidateId: string | null,
+      decision: ReviewDecision | null,
+    ) => {
+      setGeneration((currentGeneration) => {
+        if (!currentGeneration || currentGeneration.id !== nextReview.generationId) {
+          return currentGeneration
+        }
+
+        const reviewComplete =
+          nextReview.totalReadyCount > 0 &&
+          nextReview.reviewedCount >= nextReview.totalReadyCount
+
+        return {
+          ...currentGeneration,
+          reviewedCount: nextReview.reviewedCount,
+          survivorCount: nextReview.survivorCount,
+          rejectedCount: nextReview.rejectedCount,
+          lowDiversity:
+            nextReview.survivorCount === 1 || nextReview.survivorCount === 2,
+          canBreedNextGeneration: reviewComplete && nextReview.survivorCount > 0,
+          canRerollGeneration: reviewComplete && nextReview.survivorCount === 0,
+          candidates: currentGeneration.candidates.map((candidateItem) =>
+            candidateItem.id === candidateId
+              ? { ...candidateItem, reviewDecision: decision }
+              : candidateItem,
+          ),
+        }
+      })
+    },
+    [],
+  )
 
   const fetchRunHistory = useCallback(async () => {
     setIsLoadingHistory(true)
@@ -253,6 +292,7 @@ function App() {
       setGenerationStartedAt(null)
       setLastProgressAt(null)
       setLoadedCandidateImageId(null)
+      setActiveSection('generation')
       reviewedTerminalGenerationRef.current = null
 
       if (
@@ -283,6 +323,7 @@ function App() {
     formData.append('file', selectedFile)
 
     setIsUploading(true)
+    setActiveSection('generation')
     setError(null)
     setResult(null)
     setGeneration(null)
@@ -390,7 +431,9 @@ function App() {
           throw new Error(body?.detail ?? 'Review decision failed.')
         }
 
-        setReview((body as ReviewResponse).review)
+        const nextReview = (body as ReviewResponse).review
+        setReview(nextReview)
+        updateGenerationReviewState(nextReview, review.currentCandidate.id, decision)
         await fetchRunHistory()
       } catch (decisionError) {
         setReviewError(
@@ -403,7 +446,14 @@ function App() {
         reviewActionInFlightRef.current = false
       }
     },
-    [candidateImageLoaded, fetchRunHistory, isReviewing, result, review],
+    [
+      candidateImageLoaded,
+      fetchRunHistory,
+      isReviewing,
+      result,
+      review,
+      updateGenerationReviewState,
+    ],
   )
 
   const undoReviewDecision = useCallback(async () => {
@@ -432,7 +482,13 @@ function App() {
         throw new Error(body?.detail ?? 'Undo failed.')
       }
 
-      setReview((body as ReviewResponse).review)
+      const nextReview = (body as ReviewResponse).review
+      setReview(nextReview)
+      updateGenerationReviewState(
+        nextReview,
+        nextReview.currentCandidate?.id ?? null,
+        null,
+      )
       await fetchRunHistory()
     } catch (undoError) {
       setReviewError(
@@ -442,7 +498,7 @@ function App() {
       setIsReviewing(false)
       reviewActionInFlightRef.current = false
     }
-  }, [fetchRunHistory, isReviewing, result, review])
+  }, [fetchRunHistory, isReviewing, result, review, updateGenerationReviewState])
 
   const createNextGeneration = useCallback(
     async (mode: NextGenerationMode) => {
@@ -572,12 +628,11 @@ function App() {
   ])
 
   useEffect(() => {
-    const timeout = window.setTimeout(() => void fetchRunHistory(), 0)
-    return () => window.clearTimeout(timeout)
-  }, [fetchRunHistory])
-
-  useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
+      if (activeSection !== 'generation') {
+        return
+      }
+
       if (isEditableTarget(event.target)) {
         return
       }
@@ -604,141 +659,216 @@ function App() {
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [createNextGeneration, review, submitReviewDecision, undoReviewDecision])
+  }, [
+    activeSection,
+    createNextGeneration,
+    review,
+    submitReviewDecision,
+    undoReviewDecision,
+  ])
 
   return (
     <main className="app-shell">
-      <section className="upload-panel" aria-labelledby="upload-title">
-        <div className="upload-heading">
-          <p className="eyebrow">Sketcher</p>
-          <h1 id="upload-title">Create an evolution run</h1>
-        </div>
-
-        <form className="upload-form" onSubmit={handleSubmit}>
-          <label className="file-drop">
-            <span className="file-drop-label">Source SVG</span>
-            <span className="file-drop-name">{selectedFileLabel}</span>
-            <input
-              type="file"
-              accept=".svg,image/svg+xml"
-              onChange={(event) => {
-                setSelectedFile(event.target.files?.[0] ?? null)
-                setError(null)
-                setResult(null)
-                setGeneration(null)
-                setReview(null)
-                setGenerationRequestInFlight(false)
-                setGenerationStartedAt(null)
-                setLastProgressAt(null)
-                setGenerationError(null)
-                setReviewError(null)
-              }}
-            />
-          </label>
-
-          <button type="submit" disabled={isUploading}>
-            {isUploading ? 'Uploading...' : 'Start run'}
-          </button>
-        </form>
-
-        {error ? (
-          <div className="status status-error" role="alert">
-            <span>Error</span>
-            <p>{error}</p>
+      <div className="app-workspace">
+        <header className="app-header">
+          <div className="app-title">
+            <p className="eyebrow">Sketcher</p>
+            <h1>Evolution workspace</h1>
           </div>
-        ) : null}
-
-        {result ? (
-          <>
-            <section className="run-strip" aria-label="Upload result">
-              <div className="run-strip-item">
-                <span>Source</span>
-                <strong>{result.source.filename}</strong>
-              </div>
-              <div className="run-strip-item">
-                <span>Run</span>
-                <code>{shortId(result.run.id)}</code>
-              </div>
-            </section>
-
-            <RunDebugDisclosure result={result} />
-
+          <nav className="section-tabs" aria-label="Workspace sections">
             <button
-              className="generation-action"
               type="button"
-              onClick={handleGenerateCandidates}
-              disabled={isGenerating || generation !== null}
+              className={activeSection === 'generation' ? 'section-tab-active' : ''}
+              aria-current={activeSection === 'generation' ? 'page' : undefined}
+              onClick={() => setActiveSection('generation')}
             >
-              {isGenerating ? 'Generating...' : 'Generate candidates'}
+              Generation
             </button>
-          </>
-        ) : null}
-
-        {generationError ? (
-          <div className="status status-error" role="alert">
-            <span>Generation error</span>
-            <p>{generationError}</p>
-          </div>
-        ) : null}
-
-        <RunHistory
-          runs={runHistory}
-          activeRunId={result?.run.id ?? null}
-          isLoading={isLoadingHistory}
-          error={historyError}
-          onRefresh={() => void fetchRunHistory()}
-          onOpenRun={(historyRun) => void openHistoryRun(historyRun)}
-        />
-
-        <AnimatePresence>
-          {generationRequestInFlight || generation ? (
-            <GenerationProgress
-              key="generation-progress"
-              actionLabel={generationActionLabel}
-              generation={generation}
-              isInFlight={generationRequestInFlight}
-              startedAt={generationStartedAt}
-              lastProgressAt={lastProgressAt}
-            />
-          ) : null}
-        </AnimatePresence>
+            <button
+              type="button"
+              className={activeSection === 'history' ? 'section-tab-active' : ''}
+              aria-current={activeSection === 'history' ? 'page' : undefined}
+              onClick={() => {
+                setActiveSection('history')
+                void fetchRunHistory()
+              }}
+            >
+              Previous runs
+            </button>
+          </nav>
+        </header>
 
         <AnimatePresence mode="wait">
-          {generationIsReviewable && generation ? (
-            <motion.div
-              key={generation.id}
-              initial={
-                prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 10 }
-              }
-              animate={
-                prefersReducedMotion ? { opacity: 1 } : { opacity: 1, y: 0 }
-              }
-              exit={
-                prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 6 }
-              }
+          {activeSection === 'generation' ? (
+            <motion.section
+              className="workspace-section generation-workflow"
+              aria-labelledby="generation-title"
+              key="generation"
+              initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 8 }}
+              animate={prefersReducedMotion ? { opacity: 1 } : { opacity: 1, y: 0 }}
+              exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 6 }}
               transition={{ duration: 0.18 }}
             >
-              <ReviewDeck
-                generation={generation}
-                review={review}
-                candidate={currentCandidate}
-                isReviewing={isReviewing}
-                isGenerating={isGenerating}
-                candidateImageLoaded={candidateImageLoaded}
-                reviewError={reviewError}
-                onSurvive={() => void submitReviewDecision('survived')}
-                onReject={() => void submitReviewDecision('rejected')}
-                onUndo={() => void undoReviewDecision()}
-                onNextGeneration={(mode) => void createNextGeneration(mode)}
-                onCandidateImageLoad={(candidateId) =>
-                  setLoadedCandidateImageId(candidateId)
-                }
-                onCandidateImageError={() => setLoadedCandidateImageId(null)}
+              <div className="section-heading">
+                <div>
+                  <p className="eyebrow">Generation</p>
+                  <h2 id="generation-title">Create and review candidates</h2>
+                </div>
+                {result ? (
+                  <span className="generation-progress-status">
+                    Run {shortId(result.run.id)}
+                  </span>
+                ) : null}
+              </div>
+
+              <section className="upload-panel" aria-label="Source upload">
+                <form className="upload-form" onSubmit={handleSubmit}>
+                  <label className="file-drop">
+                    <span className="file-drop-label">Source SVG</span>
+                    <span className="file-drop-name">{selectedFileLabel}</span>
+                    <input
+                      type="file"
+                      accept=".svg,image/svg+xml"
+                      onChange={(event) => {
+                        setSelectedFile(event.target.files?.[0] ?? null)
+                        setError(null)
+                        setResult(null)
+                        setGeneration(null)
+                        setReview(null)
+                        setGenerationRequestInFlight(false)
+                        setGenerationStartedAt(null)
+                        setLastProgressAt(null)
+                        setGenerationError(null)
+                        setReviewError(null)
+                      }}
+                    />
+                  </label>
+
+                  <button type="submit" disabled={isUploading}>
+                    {isUploading ? 'Uploading...' : 'Start run'}
+                  </button>
+                </form>
+
+                {error ? (
+                  <div className="status status-error" role="alert">
+                    <span>Error</span>
+                    <p>{error}</p>
+                  </div>
+                ) : null}
+
+                {result ? (
+                  <>
+                    <section className="run-strip" aria-label="Upload result">
+                      <div className="run-strip-item">
+                        <span>Source</span>
+                        <strong>{result.source.filename}</strong>
+                      </div>
+                      <div className="run-strip-item">
+                        <span>Run</span>
+                        <code>{shortId(result.run.id)}</code>
+                      </div>
+                    </section>
+
+                    <RunDebugDisclosure result={result} />
+
+                    <button
+                      className="generation-action"
+                      type="button"
+                      onClick={handleGenerateCandidates}
+                      disabled={isGenerating || generation !== null}
+                    >
+                      {isGenerating ? 'Generating...' : 'Generate candidates'}
+                    </button>
+                  </>
+                ) : null}
+              </section>
+
+              {generationError ? (
+                <div className="status status-error" role="alert">
+                  <span>Generation error</span>
+                  <p>{generationError}</p>
+                </div>
+              ) : null}
+
+              <AnimatePresence>
+                {generationRequestInFlight || generation ? (
+                  <GenerationProgress
+                    key="generation-progress"
+                    actionLabel={generationActionLabel}
+                    generation={generation}
+                    isInFlight={generationRequestInFlight}
+                    startedAt={generationStartedAt}
+                    lastProgressAt={lastProgressAt}
+                  />
+                ) : null}
+              </AnimatePresence>
+
+              {generation ? (
+                <GenerationCandidatePreview
+                  generation={generation}
+                  activeCandidateId={currentCandidate?.id ?? null}
+                />
+              ) : null}
+
+              <AnimatePresence mode="wait">
+                {generationIsReviewable && generation ? (
+                  <motion.div
+                    key={generation.id}
+                    initial={
+                      prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 10 }
+                    }
+                    animate={
+                      prefersReducedMotion ? { opacity: 1 } : { opacity: 1, y: 0 }
+                    }
+                    exit={
+                      prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 6 }
+                    }
+                    transition={{ duration: 0.18 }}
+                  >
+                    <ReviewDeck
+                      generation={generation}
+                      review={review}
+                      candidate={currentCandidate}
+                      isReviewing={isReviewing}
+                      isGenerating={isGenerating}
+                      candidateImageLoaded={candidateImageLoaded}
+                      reviewError={reviewError}
+                      onSurvive={() => void submitReviewDecision('survived')}
+                      onReject={() => void submitReviewDecision('rejected')}
+                      onUndo={() => void undoReviewDecision()}
+                      onNextGeneration={(mode) => void createNextGeneration(mode)}
+                      onCandidateImageLoad={(candidateId) =>
+                        setLoadedCandidateImageId(candidateId)
+                      }
+                      onCandidateImageError={() => setLoadedCandidateImageId(null)}
+                    />
+                  </motion.div>
+                ) : null}
+              </AnimatePresence>
+            </motion.section>
+          ) : (
+            <motion.section
+              className="workspace-section history-workflow"
+              aria-labelledby="history-title"
+              key="history"
+              initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 8 }}
+              animate={prefersReducedMotion ? { opacity: 1 } : { opacity: 1, y: 0 }}
+              exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 6 }}
+              transition={{ duration: 0.18 }}
+            >
+              <RunHistory
+                runs={runHistory}
+                activeRunId={result?.run.id ?? null}
+                isLoading={isLoadingHistory}
+                error={historyError}
+                titleId="history-title"
+                onRefresh={() => void fetchRunHistory()}
+                onOpenRun={(historyRun) => void openHistoryRun(historyRun)}
               />
-            </motion.div>
-          ) : null}
+            </motion.section>
+          )}
         </AnimatePresence>
-      </section>
+      </div>
     </main>
   )
 }
@@ -767,11 +897,17 @@ type GenerationProgressProps = {
   lastProgressAt: number | null
 }
 
+type GenerationCandidatePreviewProps = {
+  generation: GenerationSummary
+  activeCandidateId: string | null
+}
+
 type RunHistoryProps = {
   runs: RunHistoryEntry[]
   activeRunId: string | null
   isLoading: boolean
   error: string | null
+  titleId: string
   onRefresh: () => void
   onOpenRun: (run: RunHistoryEntry) => void
 }
@@ -793,6 +929,10 @@ function GenerationProgress({
   const readyCount = activeGeneration?.readyCount ?? 0
   const failedCount = activeGeneration?.failedCount ?? 0
   const totalCandidateCount = activeGeneration?.totalCandidateCount ?? 0
+  const failedCandidates =
+    activeGeneration?.candidates.filter(
+      (candidateItem) => candidateItem.validationStatus === 'failed',
+    ) ?? []
   const readyPercent = Math.min(
     (readyCount / generationReadyTarget) * 100,
     100,
@@ -862,6 +1002,20 @@ function GenerationProgress({
           value={lastProgressAt ? `${formatDuration(now - lastProgressAt)} ago` : 'waiting'}
         />
       </div>
+
+      {failedCandidates.length > 0 ? (
+        <div className="generation-progress-issues" role="status">
+          <span>Candidate issues</span>
+          <ul>
+            {failedCandidates.slice(0, 3).map((candidateItem) => (
+              <li key={candidateItem.id}>
+                #{candidateItem.position}:{' '}
+                {candidateItem.validationMessage ?? 'Candidate render failed.'}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
     </motion.section>
   )
 }
@@ -904,20 +1058,114 @@ function AnimatedMetric({ label, value }: AnimatedMetricProps) {
   )
 }
 
+function GenerationCandidatePreview({
+  generation,
+  activeCandidateId,
+}: GenerationCandidatePreviewProps) {
+  const readyCandidates = generation.candidates.filter(
+    (candidateItem) => candidateItem.validationStatus === 'ready',
+  )
+
+  return (
+    <section
+      className="candidate-preview-panel"
+      aria-label="Candidate previews"
+    >
+      <div className="candidate-preview-header">
+        <div>
+          <p className="eyebrow">Generation {generation.generationNumber}</p>
+          <h2>Candidate previews</h2>
+        </div>
+        <span className="generation-progress-status">
+          {readyCandidates.length} ready
+        </span>
+      </div>
+
+      <div className="candidate-preview-grid">
+        {generation.candidates.map((candidateItem) => (
+          <CandidatePreviewTile
+            candidate={candidateItem}
+            isActive={candidateItem.id === activeCandidateId}
+            showImage={candidateItem.validationStatus === 'ready'}
+            key={candidateItem.id}
+          />
+        ))}
+      </div>
+    </section>
+  )
+}
+
+function CandidatePreviewTile({
+  candidate,
+  isActive,
+  showImage,
+}: {
+  candidate: CandidateSummary
+  isActive: boolean
+  showImage: boolean
+}) {
+  const decisionClass = candidate.reviewDecision
+    ? ` candidate-preview-${candidate.reviewDecision}`
+    : ''
+  const statusClass =
+    candidate.validationStatus === 'ready' ? '' : ' candidate-preview-unready'
+  const activeClass = isActive ? ' candidate-preview-active' : ''
+  const label = isActive
+    ? 'current'
+    : candidate.reviewDecision ?? candidate.validationStatus
+
+  return (
+    <figure
+      className={`candidate-preview-tile${decisionClass}${statusClass}${activeClass}`}
+      aria-label={`Candidate ${candidate.position} ${label}`}
+    >
+      {candidate.validationStatus === 'ready' && showImage ? (
+        <img
+          src={candidateThumbnailUrl(candidate.id)}
+          alt={`Candidate ${candidate.position} thumbnail`}
+          loading="lazy"
+        />
+      ) : (
+        <div className="candidate-preview-missing">
+          {formatStatus(label)}
+        </div>
+      )}
+      <figcaption>
+        <span>{label}</span>
+        <code>#{candidate.position}</code>
+      </figcaption>
+    </figure>
+  )
+}
+
 function RunHistory({
   runs,
   activeRunId,
   isLoading,
   error,
+  titleId,
   onRefresh,
   onOpenRun,
 }: RunHistoryProps) {
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null)
+  const selectedRunIsVisible = runs.some(
+    (historyRun) => historyRun.id === selectedRunId,
+  )
+  const activeRunIsVisible = runs.some((historyRun) => historyRun.id === activeRunId)
+  const visibleSelectedRunId = selectedRunIsVisible
+    ? selectedRunId
+    : activeRunIsVisible
+      ? activeRunId
+      : runs[0]?.id ?? null
+  const selectedRun =
+    runs.find((historyRun) => historyRun.id === visibleSelectedRunId) ?? null
+
   return (
     <section className="history-panel" aria-label="Run history">
       <div className="history-header">
         <div>
           <p className="eyebrow">History</p>
-          <h2>Previous runs</h2>
+          <h2 id={titleId}>Previous runs</h2>
         </div>
         <button
           className="secondary-action history-refresh"
@@ -940,37 +1188,75 @@ function RunHistory({
         <div className="review-empty">No runs yet.</div>
       ) : null}
 
-      <div className="history-run-list">
-        {runs.map((historyRun) => (
-          <article
-            className={`history-run${
-              historyRun.id === activeRunId ? ' history-run-active' : ''
-            }`}
-            key={historyRun.id}
+      <div className="history-content">
+        <div className="history-run-list" aria-label="Previous run list">
+          {runs.map((historyRun) => {
+            const isActiveRun = historyRun.id === activeRunId
+            const isSelectedRun = historyRun.id === visibleSelectedRunId
+            const latestGeneration = historyRun.generations[0] ?? null
+
+            return (
+              <article
+                className={`history-run${
+                  isActiveRun ? ' history-run-active' : ''
+                }${isSelectedRun ? ' history-run-selected' : ''}`}
+                key={historyRun.id}
+              >
+                <div className="history-run-main">
+                  <div>
+                    <h3>{historyRun.source.filename}</h3>
+                    <p>
+                      {historyRun.generations.length} generations -{' '}
+                      {formatTimestamp(historyRun.createdAt)}
+                    </p>
+                  </div>
+                  <span className="generation-progress-status">
+                    {isActiveRun ? 'Open' : formatStatus(historyRun.status)}
+                  </span>
+                </div>
+                <div className="history-run-summary" aria-label="Run summary">
+                  <span>{latestGeneration?.readyCount ?? 0} ready</span>
+                  <span>{latestGeneration?.survivorCount ?? 0} survived</span>
+                  <span>{latestGeneration?.rejectedCount ?? 0} rejected</span>
+                </div>
+                <div className="history-run-actions">
+                  <button
+                    className="secondary-action history-open"
+                    type="button"
+                    aria-pressed={isSelectedRun}
+                    onClick={() => setSelectedRunId(historyRun.id)}
+                  >
+                    {isSelectedRun ? 'Showing details' : 'View details'}
+                  </button>
+                  <button
+                    className="secondary-action history-open"
+                    type="button"
+                    onClick={() => onOpenRun(historyRun)}
+                  >
+                    Open run
+                  </button>
+                </div>
+              </article>
+            )
+          })}
+        </div>
+
+        {selectedRun ? (
+          <section
+            className="history-detail"
+            aria-label="Selected run generations"
           >
-            <div className="history-run-main">
+            <div className="history-detail-header">
               <div>
-                <h3>{historyRun.source.filename}</h3>
-                <p>
-                  {historyRun.generations.length} generations -{' '}
-                  {formatTimestamp(historyRun.createdAt)}
-                </p>
+                <p className="eyebrow">Selected run</p>
+                <h3>{selectedRun.source.filename}</h3>
               </div>
-              <div className="history-run-actions">
-                <span className="generation-progress-status">
-                  {historyRun.id === activeRunId ? 'Open' : formatStatus(historyRun.status)}
-                </span>
-                <button
-                  className="secondary-action history-open"
-                  type="button"
-                  onClick={() => onOpenRun(historyRun)}
-                >
-                  Open run
-                </button>
-              </div>
+              <span className="generation-progress-status">
+                {selectedRun.generations.length} generations
+              </span>
             </div>
 
-            {historyRun.generations.map((generationItem) => (
+            {selectedRun.generations.map((generationItem) => (
               <section
                 className="history-generation"
                 aria-label={`Generation ${generationItem.generationNumber} history`}
@@ -994,8 +1280,8 @@ function RunHistory({
                 </div>
               </section>
             ))}
-          </article>
-        ))}
+          </section>
+        ) : null}
       </div>
     </section>
   )
@@ -1011,7 +1297,7 @@ function HistoryCandidate({ candidate }: { candidate: CandidateSummary }) {
     <figure className={`history-candidate${decisionClass}`}>
       {candidate.validationStatus === 'ready' ? (
         <img
-          src={`${apiBaseUrl}/candidates/${encodeURIComponent(candidate.id)}/artifact`}
+          src={candidateThumbnailUrl(candidate.id)}
           alt={`Generation ${candidate.generationNumber} candidate ${candidate.position}`}
           loading="lazy"
         />
@@ -1213,8 +1499,8 @@ function ReviewDeck({
       <div className="candidate-stage">
         <img
           key={candidate.id}
-          src={`${apiBaseUrl}/candidates/${encodeURIComponent(candidate.id)}/artifact`}
-          alt={`Candidate ${review.currentIndex} artifact`}
+          src={candidateReviewImageUrl(candidate.id)}
+          alt={`Candidate ${review.currentIndex} preview`}
           onLoad={() => onCandidateImageLoad(candidate.id)}
           onError={onCandidateImageError}
         />
@@ -1302,6 +1588,18 @@ function ReviewDeck({
   )
 }
 
+function candidateThumbnailUrl(candidateId: string) {
+  return `${apiBaseUrl}/candidates/${encodeURIComponent(
+    candidateId,
+  )}/thumbnail.png?size=${thumbnailSize}`
+}
+
+function candidateReviewImageUrl(candidateId: string) {
+  return `${apiBaseUrl}/candidates/${encodeURIComponent(
+    candidateId,
+  )}/thumbnail.png?size=${reviewImageSize}`
+}
+
 function formatByteSize(byteSize: number) {
   if (byteSize < 1024) {
     return `${byteSize} B`
@@ -1323,7 +1621,8 @@ function formatDuration(durationMs: number) {
 }
 
 function formatStatus(status: string) {
-  return status.replaceAll('_', ' ')
+  const label = status.replaceAll('_', ' ')
+  return label.charAt(0).toUpperCase() + label.slice(1)
 }
 
 function formatOrigin(originType: string) {

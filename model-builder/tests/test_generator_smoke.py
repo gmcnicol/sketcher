@@ -13,6 +13,17 @@ from sketcher_model_builder.generator import (
 )
 
 
+def style_to_dict(style: str | None) -> dict[str, str]:
+    values: dict[str, str] = {}
+    if not style:
+        return values
+    for part in style.split(";"):
+        if ":" in part:
+            key, value = part.split(":", 1)
+            values[key] = value
+    return values
+
+
 def test_generator_writes_svg(tmp_path: Path) -> None:
     input_svg = Path(__file__).parent / "fixtures" / "tom2.svg"
     output_svg = tmp_path / "tom2.sketch.svg"
@@ -124,6 +135,67 @@ def test_fill_mode_preserves_scanned_stroke_subpaths(tmp_path: Path) -> None:
     assert len(sketch_paths) == 1
     assert sketch_paths[0].get("d", "").count("M") == 2
     assert fill_paths == []
+
+
+def test_flick_taper_emits_three_randomized_paths_per_segment(tmp_path: Path) -> None:
+    input_svg = tmp_path / "source.svg"
+    output_svg = tmp_path / "out.svg"
+    input_svg.write_text(
+        """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 10">
+  <path id="line" d="M 0 5 L 10 5 L 20 5 L 30 5" style="fill:none;stroke:#000;stroke-width:1" />
+</svg>
+""",
+        encoding="utf-8",
+    )
+
+    render_sketch_svg(
+        input_svg,
+        output_svg,
+        mode="stroke",
+        repeats=1,
+        shade_strokes=0,
+        jitter=0.05,
+        roughness=0.05,
+        stroke_width=1.0,
+        opacity=0.5,
+        seed=3,
+        flick_strength=1,
+        flick_bias="start",
+        flick_curve="linear",
+        flick_probability=1,
+        flick_min_width=0.08,
+        flick_min_opacity=0.04,
+    )
+
+    root = ET.parse(output_svg).getroot()
+    segment_paths = [
+        element
+        for element in root.iter()
+        if element.get("data-sketcher-pass") == "1"
+    ]
+
+    assert len(segment_paths) == 9
+    assert all("-segment-" in (element.get("id") or "") for element in segment_paths)
+
+    segment_widths: dict[str, list[float]] = {"1": [], "2": [], "3": []}
+    segment_opacities: dict[str, list[float]] = {"1": [], "2": [], "3": []}
+    segment_ds: dict[str, set[str]] = {"1": set(), "2": set(), "3": set()}
+    for element in segment_paths:
+        segment_index = (element.get("id") or "").split("-segment-", 1)[1].split("-", 1)[0]
+        style = style_to_dict(element.get("style"))
+        segment_widths[segment_index].append(float(style["stroke-width"]))
+        segment_opacities[segment_index].append(float(style["stroke-opacity"]))
+        segment_ds[segment_index].add(element.get("d", ""))
+
+    assert all(len(values) == 3 for values in segment_widths.values())
+    assert all(len(values) == 3 for values in segment_opacities.values())
+    assert all(len(values) == 3 for values in segment_ds.values())
+    assert min(segment_widths["1"]) > max(segment_widths["2"])
+    assert min(segment_widths["2"]) > max(segment_widths["3"])
+    assert min(segment_opacities["1"]) > max(segment_opacities["2"])
+    assert min(segment_opacities["2"]) > max(segment_opacities["3"])
+    assert min(min(values) for values in segment_widths.values()) >= 0.08
+    assert min(min(values) for values in segment_opacities.values()) >= 0.04
 
 
 def test_stroke_routes_can_be_ordered_by_nearest_endpoint() -> None:

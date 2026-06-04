@@ -19,6 +19,9 @@ XLINK_NS = "http://www.w3.org/1999/xlink"
 EDITOR_METADATA_NAMESPACES = {INKSCAPE_NS, SODIPODI_NS}
 EXPORT_BOUNDING_TAGS = {"path", "rect", "circle", "ellipse", "line", "polyline", "polygon"}
 NON_RENDERED_CONTAINER_TAGS = {"clipPath", "defs", "mask", "metadata", "pattern", "symbol"}
+FLICK_BIASES = {"start", "end", "neutral"}
+FLICK_CURVES = {"linear", "ease_in", "ease_out"}
+FLICK_SEGMENT_STROKE_COPIES = 3
 
 PATH_TOKEN_RE = re.compile(
     r"[AaCcHhLlMmQqSsTtVvZz]|[-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?"
@@ -794,6 +797,49 @@ def route_length(route: list[tuple[float, float]]) -> float:
     )
 
 
+def route_segment_pairs(
+    routes: list[list[tuple[float, float]]],
+) -> list[tuple[tuple[float, float], tuple[float, float]]]:
+    return [
+        (route[index - 1], route[index])
+        for route in routes
+        for index in range(1, len(route))
+    ]
+
+
+def flick_curve_value(phase: float, curve: str) -> float:
+    if curve == "ease_in":
+        return phase * phase
+    if curve == "ease_out":
+        return 1 - (1 - phase) * (1 - phase)
+    return phase
+
+
+def flick_taper_factor(
+    segment_index: int,
+    segment_count: int,
+    *,
+    flick_strength: float,
+    flick_bias: str,
+    flick_curve: str,
+) -> float:
+    if segment_count <= 1 or flick_strength <= 0:
+        return 1.0
+
+    phase = segment_index / max(segment_count - 1, 1)
+    if flick_bias == "end":
+        phase = 1 - phase
+
+    taper = flick_curve_value(phase, flick_curve)
+    return max(0.0, 1 - flick_strength * taper)
+
+
+def resolved_flick_bias(flick_bias: str, rng: random.Random) -> str:
+    if flick_bias == "neutral":
+        return rng.choice(["start", "end"])
+    return flick_bias
+
+
 def point_at_route_distance(
     route: list[tuple[float, float]],
     target_distance: float,
@@ -1359,6 +1405,12 @@ def sketch_paths(
     pressure_variance: float,
     strength_variance: float,
     full_retrace_interval: int,
+    flick_strength: float,
+    flick_bias: str,
+    flick_curve: str,
+    flick_probability: float,
+    flick_min_width: float,
+    flick_min_opacity: float,
     rng: random.Random,
 ) -> int:
     defs = get_or_create_defs(root)
@@ -1411,6 +1463,7 @@ def sketch_paths(
         for repeat_index in range(repeats):
             copy = deepcopy(path)
             copy.set("id", f"{path.get('id', 'path')}-sketch-{repeat_index + 1}")
+            pass_routes: list[list[tuple[float, float]]] = []
             if path_mode == "stroke":
                 try:
                     sampled_routes = order_routes_by_nearest_endpoint(
@@ -1422,23 +1475,25 @@ def sketch_paths(
                         f"{path.get('id', 'path')} is a closed outline, not an open stroke route. "
                         "Use open centreline paths for rough sketch mode, or run --mode outline to roughen outlines."
                     ) from error
+                pass_routes = human_stroke_routes_for_pass(
+                    sampled_routes,
+                    rng,
+                    repeat_index,
+                    fragment_min=stroke_fragment_min,
+                    fragment_max=stroke_fragment_max,
+                    fragment_probability=stroke_fragment_probability,
+                    full_retrace_interval=full_retrace_interval,
+                )
                 copy.set(
                     "d",
                     " ".join(
                         smooth_path_from_points(route, rng, jitter, roughness)
-                        for route in human_stroke_routes_for_pass(
-                            sampled_routes,
-                            rng,
-                            repeat_index,
-                            fragment_min=stroke_fragment_min,
-                            fragment_max=stroke_fragment_max,
-                            fragment_probability=stroke_fragment_probability,
-                            full_retrace_interval=full_retrace_interval,
-                        )
+                        for route in pass_routes
                     ),
                 )
             else:
                 sampled = sample_path_outline(path.get("d", ""), curve_steps=10)
+                pass_routes = [sampled]
                 copy.set("d", smooth_path_from_points(sampled, rng, jitter, roughness))
 
             pressure = rng.lognormvariate(0, pressure_variance)
@@ -1460,7 +1515,55 @@ def sketch_paths(
             copy.set("style", dict_to_style(style))
             copy.set("data-sketcher-pass", str(repeat_index + 1))
 
-            group.append(copy)
+            segment_pairs = route_segment_pairs(pass_routes)
+            should_flick = (
+                len(segment_pairs) > 1
+                and flick_strength > 0
+                and flick_probability > 0
+                and rng.random() <= flick_probability
+            )
+            if not should_flick:
+                group.append(copy)
+                continue
+
+            base_width = float(style["stroke-width"])
+            base_opacity = float(style["stroke-opacity"])
+            pass_flick_bias = resolved_flick_bias(flick_bias, rng)
+            for segment_index, (start, end) in enumerate(segment_pairs):
+                taper = flick_taper_factor(
+                    segment_index,
+                    len(segment_pairs),
+                    flick_strength=flick_strength,
+                    flick_bias=pass_flick_bias,
+                    flick_curve=flick_curve,
+                )
+                for copy_index in range(FLICK_SEGMENT_STROKE_COPIES):
+                    segment = deepcopy(copy)
+                    segment.set(
+                        "id",
+                        (
+                            f"{path.get('id', 'path')}-sketch-{repeat_index + 1}"
+                            f"-segment-{segment_index + 1}-{copy_index + 1}"
+                        ),
+                    )
+                    segment.set(
+                        "d",
+                        smooth_path_from_points([start, end], rng, jitter, roughness),
+                    )
+                    segment_style = dict(style)
+                    width_variation = rng.uniform(0.92, 1.08)
+                    opacity_variation = rng.uniform(0.88, 1.12)
+                    segment_style["stroke-width"] = fmt_number(
+                        max(flick_min_width, base_width * taper * width_variation)
+                    )
+                    segment_style["stroke-opacity"] = fmt_number(
+                        max(
+                            flick_min_opacity,
+                            min(1, base_opacity * taper * opacity_variation),
+                        )
+                    )
+                    segment.set("style", dict_to_style(segment_style))
+                    group.append(segment)
 
         append_after(parent, path, group)
 
@@ -1490,6 +1593,12 @@ def render_sketch_svg(
     pressure_variance: float = 0.48,
     strength_variance: float = 0.45,
     full_retrace_interval: int = 13,
+    flick_strength: float = 0.45,
+    flick_bias: str = "start",
+    flick_curve: str = "ease_out",
+    flick_probability: float = 0.65,
+    flick_min_width: float = 0.08,
+    flick_min_opacity: float = 0.04,
 ) -> int:
     if repeats < 1:
         raise ValueError("repeats must be at least 1")
@@ -1525,6 +1634,18 @@ def render_sketch_svg(
         raise ValueError("strength_variance must be 0 or greater")
     if full_retrace_interval < 0:
         raise ValueError("full_retrace_interval must be 0 or greater")
+    if not 0 <= flick_strength <= 1:
+        raise ValueError("flick_strength must be between 0 and 1")
+    if flick_bias not in FLICK_BIASES:
+        raise ValueError("flick_bias must be one of start, end, or neutral")
+    if flick_curve not in FLICK_CURVES:
+        raise ValueError("flick_curve must be one of linear, ease_in, or ease_out")
+    if not 0 <= flick_probability <= 1:
+        raise ValueError("flick_probability must be between 0 and 1")
+    if flick_min_width <= 0:
+        raise ValueError("flick_min_width must be greater than 0")
+    if not 0 < flick_min_opacity <= 1:
+        raise ValueError("flick_min_opacity must be greater than 0 and no more than 1")
 
     register_namespaces()
     tree = ET.parse(input_path)
@@ -1551,6 +1672,12 @@ def render_sketch_svg(
         pressure_variance=pressure_variance,
         strength_variance=strength_variance,
         full_retrace_interval=full_retrace_interval,
+        flick_strength=flick_strength,
+        flick_bias=flick_bias,
+        flick_curve=flick_curve,
+        flick_probability=flick_probability,
+        flick_min_width=flick_min_width,
+        flick_min_opacity=flick_min_opacity,
         rng=random.Random(seed),
     )
 
@@ -1597,6 +1724,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pressure-variance", type=float, default=0.48, help="Log-normal pressure variation for retrace width")
     parser.add_argument("--strength-variance", type=float, default=0.45, help="Opacity variation around each retrace")
     parser.add_argument("--full-retrace-interval", type=int, default=13, help="Every N passes draw full source strokes; 0 disables scheduled full retraces")
+    parser.add_argument("--flick-strength", type=float, default=0.45, help="Taper strength applied to triggered retrace passes")
+    parser.add_argument(
+        "--flick-bias",
+        choices=["start", "end", "neutral"],
+        default="start",
+        help="Which end of a triggered retrace pass keeps the heavier pencil pressure",
+    )
+    parser.add_argument(
+        "--flick-curve",
+        choices=["linear", "ease_in", "ease_out"],
+        default="ease_out",
+        help="Curve used for tapered retrace pass pressure falloff",
+    )
+    parser.add_argument("--flick-probability", type=float, default=0.65, help="Chance that a retrace pass is emitted as tapered segments")
+    parser.add_argument("--flick-min-width", type=float, default=0.08, help="Minimum stroke width for tapered segment output")
+    parser.add_argument("--flick-min-opacity", type=float, default=0.04, help="Minimum stroke opacity for tapered segment output")
     parser.add_argument(
         "--keep-original",
         action="store_true",
@@ -1630,6 +1773,12 @@ def main() -> None:
             pressure_variance=args.pressure_variance,
             strength_variance=args.strength_variance,
             full_retrace_interval=args.full_retrace_interval,
+            flick_strength=args.flick_strength,
+            flick_bias=args.flick_bias,
+            flick_curve=args.flick_curve,
+            flick_probability=args.flick_probability,
+            flick_min_width=args.flick_min_width,
+            flick_min_opacity=args.flick_min_opacity,
         )
     except (ET.ParseError, ValueError) as error:
         raise SystemExit(str(error)) from error

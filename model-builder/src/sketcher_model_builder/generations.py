@@ -43,6 +43,14 @@ DENSE_STROKE_WIDTH_FLOOR = 0.095
 DENSE_STROKE_OPACITY_FLOOR = 0.058
 DENSE_SHADE_WIDTH_FLOOR = 0.22
 DENSE_SHADE_OPACITY_FLOOR = 0.07
+DEFAULT_FLICK_STRENGTH = 0.45
+DEFAULT_FLICK_BIAS = "start"
+DEFAULT_FLICK_CURVE = "ease_out"
+DEFAULT_FLICK_PROBABILITY = 0.65
+DEFAULT_FLICK_MIN_WIDTH = 0.08
+DEFAULT_FLICK_MIN_OPACITY = 0.04
+FLICK_BIASES = ("start", "end", "neutral")
+FLICK_CURVES = ("linear", "ease_in", "ease_out")
 SKETCH_PATH_MARKERS = {
     "data-sketcher-pass",
     "data-sketcher-flow-pass",
@@ -642,7 +650,15 @@ def build_first_generation_genome(
     seed = candidate_seed(run_id, attempt)
     rng = random.Random(seed)
 
-    render_parameters = dict(base_parameters)
+    render_parameters = {
+        "flick_strength": DEFAULT_FLICK_STRENGTH,
+        "flick_bias": DEFAULT_FLICK_BIAS,
+        "flick_curve": DEFAULT_FLICK_CURVE,
+        "flick_probability": DEFAULT_FLICK_PROBABILITY,
+        "flick_min_width": DEFAULT_FLICK_MIN_WIDTH,
+        "flick_min_opacity": DEFAULT_FLICK_MIN_OPACITY,
+        **base_parameters,
+    }
     repeats_min, repeats_max, _ = repeat_limits_for_source(source_substroke_count)
     render_parameters.update(
         {
@@ -965,6 +981,46 @@ def mutate_render_parameters(
             maximum=28,
             delta=6,
         ),
+        "flick_strength": mutate_float_parameter(
+            parent_parameters.get("flick_strength", DEFAULT_FLICK_STRENGTH),
+            rng,
+            minimum=0.0,
+            maximum=1.0,
+            variance=0.3,
+        ),
+        "flick_bias": mutate_choice_parameter(
+            parent_parameters.get("flick_bias", DEFAULT_FLICK_BIAS),
+            rng,
+            choices=FLICK_BIASES,
+            mutation_probability=0.18,
+        ),
+        "flick_curve": mutate_choice_parameter(
+            parent_parameters.get("flick_curve", DEFAULT_FLICK_CURVE),
+            rng,
+            choices=FLICK_CURVES,
+            mutation_probability=0.18,
+        ),
+        "flick_probability": mutate_float_parameter(
+            parent_parameters.get("flick_probability", DEFAULT_FLICK_PROBABILITY),
+            rng,
+            minimum=0.0,
+            maximum=1.0,
+            variance=0.35,
+        ),
+        "flick_min_width": mutate_float_parameter(
+            parent_parameters.get("flick_min_width", DEFAULT_FLICK_MIN_WIDTH),
+            rng,
+            minimum=0.01,
+            maximum=0.3,
+            variance=0.25,
+        ),
+        "flick_min_opacity": mutate_float_parameter(
+            parent_parameters.get("flick_min_opacity", DEFAULT_FLICK_MIN_OPACITY),
+            rng,
+            minimum=0.005,
+            maximum=1.0,
+            variance=0.25,
+        ),
         "keep_original": bool(parent_parameters.get("keep_original", False)),
     }
     if render_parameters["stroke_fragment_min"] > render_parameters["stroke_fragment_max"]:
@@ -1067,6 +1123,20 @@ def mutate_float_parameter(
         numeric_value = minimum
     factor = 1 + rng.uniform(-variance, variance)
     return clamp_float(numeric_value * factor, minimum, maximum)
+
+
+def mutate_choice_parameter(
+    value: Any,
+    rng: random.Random,
+    *,
+    choices: tuple[str, ...],
+    mutation_probability: float,
+) -> str:
+    current = str(value) if value in choices else choices[0]
+    if rng.random() > mutation_probability:
+        return current
+    alternatives = [choice for choice in choices if choice != current]
+    return rng.choice(alternatives or list(choices))
 
 
 def candidate_seed(run_id: str, attempt: int) -> int:

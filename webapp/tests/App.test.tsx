@@ -177,10 +177,31 @@ describe('App MVP flow', () => {
       survivorCount: 1,
       rejectedCount: 1,
     })
+    const olderGeneration = generation({
+      id: 'older-generation',
+      candidates: [
+        candidate({
+          id: 'older-candidate',
+          generationId: 'older-generation',
+          position: 7,
+        }),
+      ],
+    })
     installFetch({
       historyRuns: [
         runHistory({
           generations: [historyGeneration],
+        }),
+        runHistory({
+          id: 'older-run',
+          sourceId: 'older-source',
+          source: {
+            ...source,
+            id: 'older-source',
+            filename: 'older-source.svg',
+            createdAt: '2026-06-03T00:00:00+00:00',
+          },
+          generations: [olderGeneration],
         }),
       ],
       review: review({
@@ -193,22 +214,46 @@ describe('App MVP flow', () => {
     })
     render(<App />)
 
-    expect(await screen.findByText('Previous runs')).toBeTruthy()
-    expect(screen.getByText('1 survived')).toBeTruthy()
-    expect(screen.getByText('1 rejected')).toBeTruthy()
+    expect(screen.queryByLabelText('Run history')).toBeNull()
+
+    await user.click(screen.getByRole('button', { name: /previous runs/i }))
+
+    expect(await screen.findByLabelText('Run history')).toBeTruthy()
+    expect(screen.getAllByText('1 survived').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('1 rejected').length).toBeGreaterThan(0)
     expect(screen.getByText('survived')).toBeTruthy()
     expect(screen.getByText('rejected')).toBeTruthy()
+    expect(
+      screen.queryByRole('img', { name: /generation 1 candidate 7/i }),
+    ).toBeNull()
 
-    await user.click(screen.getByRole('button', { name: /open run/i }))
+    await user.click(screen.getByRole('button', { name: /view details/i }))
+    expect(
+      await screen.findByRole('img', { name: /generation 1 candidate 7/i }),
+    ).toBeTruthy()
+
+    await user.click(screen.getAllByRole('button', { name: /open run/i })[0])
 
     expect(await screen.findByLabelText('Generation progress')).toBeTruthy()
+    expect(screen.queryByLabelText('Run history')).toBeNull()
     expect(screen.getAllByText('Generation 1')).toBeTruthy()
   })
 
-  it('generates candidates, shows progress, loads review state, and renders the artifact image URL', async () => {
+  it('generates candidates, shows progress, loads review state, and renders PNG image URLs', async () => {
     const user = userEvent.setup()
     const firstCandidate = candidate({ id: 'candidate-1' })
-    const firstGeneration = generation({ candidates: [firstCandidate] })
+    const failedCandidate = candidate({
+      id: 'candidate-failed',
+      position: 2,
+      validationStatus: 'failed',
+      validationMessage: 'Rendered candidate artifact is too large.',
+    })
+    const firstGeneration = generation({
+      candidates: [firstCandidate, failedCandidate],
+      status: 'partial_failed',
+      failedCount: 1,
+      totalCandidateCount: 25,
+    })
     installFetch({
       generation: firstGeneration,
       review: review({
@@ -222,14 +267,24 @@ describe('App MVP flow', () => {
     await user.click(screen.getByRole('button', { name: /generate candidates/i }))
 
     expect(await screen.findByLabelText('Generation progress')).toBeTruthy()
-    expect(screen.getAllByText('Generation 1')).toHaveLength(2)
+    expect(screen.getAllByText('Generation 1')).toHaveLength(3)
     expect(screen.getByText('24 / 24')).toBeTruthy()
+    expect(screen.getByLabelText('Candidate previews')).toBeTruthy()
+    expect(screen.getByLabelText('Candidate 1 current')).toBeTruthy()
+    expect(screen.getByText('Partial failed')).toBeTruthy()
+    expect(screen.getByText('Candidate issues')).toBeTruthy()
+    expect(screen.getByText(/Rendered candidate artifact is too large/i)).toBeTruthy()
     expect(await screen.findByText('Candidate 1 of 24')).toBeTruthy()
 
-    const image = screen.getByRole('img', { name: /candidate 1 artifact/i })
+    expect(screen.getByRole('img', { name: /candidate 1 thumbnail/i })).toHaveAttribute(
+      'src',
+      '/api/candidates/candidate-1/thumbnail.png?size=256',
+    )
+
+    const image = screen.getByRole('img', { name: /^candidate 1 preview$/i })
     expect(image).toHaveAttribute(
       'src',
-      '/api/candidates/candidate-1/artifact',
+      '/api/candidates/candidate-1/thumbnail.png?size=1024',
     )
   })
 
@@ -272,11 +327,15 @@ describe('App MVP flow', () => {
     await uploadSourceSvg(user)
     await user.click(screen.getByRole('button', { name: /generate candidates/i }))
     const firstImage = await screen.findByRole('img', {
-      name: /candidate 1 artifact/i,
+      name: /^candidate 1 preview$/i,
     })
 
     await user.keyboard('j')
     expect(decisionBodies(fetchMock)).toEqual([])
+    expect(screen.getByRole('img', { name: /candidate 2 thumbnail/i })).toHaveAttribute(
+      'src',
+      '/api/candidates/candidate-2/thumbnail.png?size=256',
+    )
 
     const textarea = document.createElement('textarea')
     document.body.append(textarea)
@@ -287,21 +346,30 @@ describe('App MVP flow', () => {
     textarea.remove()
 
     await user.keyboard('j')
-    await screen.findByRole('img', { name: /candidate 2 artifact/i })
+    await screen.findByRole('img', { name: /^candidate 2 preview$/i })
+    expect(await screen.findByLabelText('Candidate 1 survived')).toBeTruthy()
+    expect(screen.getByRole('img', { name: /candidate 1 thumbnail/i })).toHaveAttribute(
+      'src',
+      '/api/candidates/candidate-1/thumbnail.png?size=256',
+    )
+    expect(screen.getByLabelText('Candidate 2 current')).toBeTruthy()
     expect(decisionBodies(fetchMock)).toEqual([
       { candidateId: 'candidate-1', decision: 'survived' },
     ])
 
-    fireEvent.load(screen.getByRole('img', { name: /candidate 2 artifact/i }))
+    fireEvent.load(screen.getByRole('img', { name: /^candidate 2 preview$/i }))
     await user.keyboard('k')
-    await screen.findByRole('img', { name: /candidate 3 artifact/i })
+    await screen.findByRole('img', { name: /^candidate 3 preview$/i })
+    expect(await screen.findByLabelText('Candidate 2 rejected')).toBeTruthy()
+    expect(screen.getByLabelText('Candidate 3 current')).toBeTruthy()
     expect(decisionBodies(fetchMock)).toEqual([
       { candidateId: 'candidate-1', decision: 'survived' },
       { candidateId: 'candidate-2', decision: 'rejected' },
     ])
 
     await user.keyboard('u')
-    await screen.findByRole('img', { name: /candidate 2 artifact/i })
+    await screen.findByRole('img', { name: /^candidate 2 preview$/i })
+    expect(await screen.findByLabelText('Candidate 2 current')).toBeTruthy()
     expect(undoCallCount(fetchMock)).toBe(1)
   })
 

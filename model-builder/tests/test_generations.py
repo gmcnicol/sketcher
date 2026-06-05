@@ -138,6 +138,43 @@ def test_first_generation_genomes_include_flick_defaults() -> None:
     assert render_parameters["flick_min_opacity"] == 0.04
 
 
+def test_complex_first_generation_sources_use_low_repeat_counts() -> None:
+    genome = generations.build_first_generation_genome(
+        "run-1",
+        1,
+        source_substroke_count=48,
+    )
+
+    assert (
+        generations.SPLIT_SOURCE_REPEATS_MIN
+        <= genome["renderParameters"]["repeats"]
+        <= generations.SPLIT_SOURCE_REPEATS_MAX
+    )
+    assert (
+        generations.SHADE_STROKES_MIN
+        <= genome["renderParameters"]["shade_strokes"]
+        <= generations.SPLIT_SOURCE_SHADE_STROKES_MAX
+    )
+
+
+def test_oversized_candidate_artifacts_are_rejected_and_removed(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    artifact_path = tmp_path / "candidate.svg"
+    write_valid_candidate_svg(artifact_path)
+    artifact_path.write_text(
+        artifact_path.read_text(encoding="utf-8") + "<!-- oversized -->",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(generations, "MAX_CANDIDATE_ARTIFACT_BYTES", 32)
+
+    with pytest.raises(ValueError, match="too large"):
+        generations.validate_candidate_svg(artifact_path, (0, 0, 10, 10))
+
+    assert not artifact_path.exists()
+
+
 def test_generation_endpoint_creates_first_generation_with_24_ready_candidates(
     tmp_path: Path,
 ) -> None:
@@ -504,6 +541,28 @@ def test_running_first_generation_is_visible_before_request_completes(
     assert isinstance(summary, generations.GenerationSummary)
     assert summary.status == "ready"
     assert summary.ready_count == 24
+
+
+def test_first_generation_can_start_while_history_read_is_open(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    install_fast_renderer(monkeypatch)
+    workspace = tmp_path / "workspace"
+    client = TestClient(create_app(workspace))
+    run_id = upload_source(client)["run"]["id"]
+    reader = sqlite3.connect(workspace / "sketcher.sqlite3")
+    reader.execute("BEGIN")
+    reader.execute("SELECT * FROM runs").fetchall()
+
+    try:
+        response = client.post(f"/runs/{run_id}/generations")
+    finally:
+        reader.rollback()
+        reader.close()
+
+    assert response.status_code == 201
+    assert response.json()["generation"]["readyCount"] == 24
 
 
 def test_failed_render_attempt_is_visible_while_generation_is_running(

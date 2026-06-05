@@ -28,15 +28,18 @@ MAX_FIRST_GENERATION_ATTEMPTS = 72
 NEXT_GENERATION_SIZE = 24
 MAX_NEXT_GENERATION_ATTEMPTS = 96
 MAX_SURVIVOR_CARRYOVERS = 8
+MAX_CANDIDATE_ARTIFACT_BYTES = 32 * 1024 * 1024
 REPEATS_MIN = 100
 REPEATS_MAX = 3000
 REPEATS_MUTATION_DELTA = 3000
 SPLIT_SOURCE_REPEATS_MIN = 4
-SPLIT_SOURCE_REPEATS_MAX = 24
+SPLIT_SOURCE_REPEATS_MAX = 8
 SPLIT_SOURCE_REPEATS_MUTATION_DELTA = 8
 SHADE_STROKES_MIN = 0
 SHADE_STROKES_MAX = 3000
 SHADE_STROKES_MUTATION_DELTA = 3000
+SPLIT_SOURCE_SHADE_STROKES_MAX = 12
+SPLIT_SOURCE_SHADE_STROKES_MUTATION_DELTA = 8
 DENSE_REPEATS_BASELINE = 60
 DENSE_SHADE_STROKES_BASELINE = 90
 DENSE_STROKE_WIDTH_FLOOR = 0.095
@@ -161,6 +164,15 @@ class SourceContext:
     source_path: Path
     source_bounds: tuple[float, float, float, float]
     substroke_count: int
+    renderable_element_count: int
+
+    @property
+    def complexity_count(self) -> int:
+        if self.substroke_count > 0:
+            return self.substroke_count
+        if self.renderable_element_count > 24:
+            return self.renderable_element_count
+        return 0
 
 
 @dataclass(frozen=True)
@@ -204,7 +216,7 @@ def create_first_generation(workspace: Path, run_id: str) -> GenerationSummary:
             genome = build_first_generation_genome(
                 run_id,
                 attempt,
-                source_substroke_count=source_context.substroke_count,
+                source_substroke_count=source_context.complexity_count,
             )
             artifact_relative_path = candidate_artifact_path(
                 run_id=run_id,
@@ -328,7 +340,7 @@ def create_next_generation(
                 generation_number=generation_number,
                 slot=slot,
                 parent=survivors[(slot - 1) % len(survivors)],
-                source_substroke_count=source_context.substroke_count,
+                source_substroke_count=source_context.complexity_count,
             ),
         )
         ready_count += mutation_ready_count
@@ -346,7 +358,7 @@ def create_next_generation(
                 run_id=run_id,
                 generation_number=generation_number,
                 slot=slot,
-                source_substroke_count=source_context.substroke_count,
+                source_substroke_count=source_context.complexity_count,
             ),
         )
         ready_count += immigrant_ready_count
@@ -503,6 +515,7 @@ def load_source_context(
     try:
         source_bounds = source_svg_bounds(source_path)
         substroke_count = source_substroke_count(source_path)
+        renderable_element_count = source_renderable_element_count(source_path)
     except (ET.ParseError, ValueError) as error:
         raise SourceArtifactError(
             f"Run source artifact is not a renderable SVG: {error}"
@@ -514,6 +527,7 @@ def load_source_context(
         source_path=source_path,
         source_bounds=source_bounds,
         substroke_count=substroke_count,
+        renderable_element_count=renderable_element_count,
     )
 
 
@@ -649,6 +663,20 @@ def source_substroke_count(source_path: Path) -> int:
     )
 
 
+def source_renderable_element_count(source_path: Path) -> int:
+    root = ET.parse(source_path).getroot()
+    renderable_shape_tags = {"rect", "circle", "ellipse", "line", "polyline", "polygon"}
+    return sum(
+        1
+        for element in root.iter()
+        if (
+            local_name(element) == "path"
+            and element.get("d")
+            or local_name(element) in renderable_shape_tags
+        )
+    )
+
+
 def build_first_generation_genome(
     run_id: str,
     attempt: int,
@@ -731,6 +759,9 @@ def build_first_generation_genome(
         **base_parameters,
     }
     repeats_min, repeats_max, _ = repeat_limits_for_source(source_substroke_count)
+    shade_strokes_min, shade_strokes_max, _ = shade_limits_for_source(
+        source_substroke_count
+    )
     render_parameters.update(
         {
             "seed": seed,
@@ -774,8 +805,8 @@ def build_first_generation_genome(
             ),
             "shade_strokes": clamp_int(
                 render_parameters["shade_strokes"] + rng.randint(-10, 14),
-                SHADE_STROKES_MIN,
-                SHADE_STROKES_MAX,
+                shade_strokes_min,
+                shade_strokes_max,
             ),
             "jitter": clamp_float(
                 render_parameters["jitter"] * rng.uniform(0.65, 1.65),
@@ -944,6 +975,9 @@ def mutate_render_parameters(
     repeats_min, repeats_max, repeats_delta = repeat_limits_for_source(
         source_substroke_count
     )
+    shade_strokes_min, shade_strokes_max, shade_strokes_delta = shade_limits_for_source(
+        source_substroke_count
+    )
     render_parameters = {
         "mode": parent_parameters.get("mode", "auto"),
         "repeats": mutate_int_parameter(
@@ -956,9 +990,9 @@ def mutate_render_parameters(
         "shade_strokes": mutate_int_parameter(
             parent_parameters.get("shade_strokes", 24),
             rng,
-            minimum=SHADE_STROKES_MIN,
-            maximum=SHADE_STROKES_MAX,
-            delta=SHADE_STROKES_MUTATION_DELTA,
+            minimum=shade_strokes_min,
+            maximum=shade_strokes_max,
+            delta=shade_strokes_delta,
         ),
         "jitter": mutate_float_parameter(
             parent_parameters.get("jitter", 0.08),
@@ -1107,6 +1141,16 @@ def repeat_limits_for_source(source_substroke_count: int) -> tuple[int, int, int
             SPLIT_SOURCE_REPEATS_MUTATION_DELTA,
         )
     return REPEATS_MIN, REPEATS_MAX, REPEATS_MUTATION_DELTA
+
+
+def shade_limits_for_source(source_substroke_count: int) -> tuple[int, int, int]:
+    if source_substroke_count > 0:
+        return (
+            SHADE_STROKES_MIN,
+            SPLIT_SOURCE_SHADE_STROKES_MAX,
+            SPLIT_SOURCE_SHADE_STROKES_MUTATION_DELTA,
+        )
+    return SHADE_STROKES_MIN, SHADE_STROKES_MAX, SHADE_STROKES_MUTATION_DELTA
 
 
 def humanize_dense_strokes(render_parameters: dict[str, Any]) -> dict[str, Any]:
@@ -1276,6 +1320,13 @@ def validate_candidate_svg(
 ) -> str:
     if not artifact_path.exists():
         raise ValueError("Rendered candidate artifact is missing.")
+    byte_size = artifact_path.stat().st_size
+    if byte_size > MAX_CANDIDATE_ARTIFACT_BYTES:
+        artifact_path.unlink()
+        raise ValueError(
+            "Rendered candidate artifact is too large "
+            f"({byte_size} bytes, max {MAX_CANDIDATE_ARTIFACT_BYTES})."
+        )
     data = artifact_path.read_bytes()
     if not data.strip():
         raise ValueError("Rendered candidate artifact is empty.")

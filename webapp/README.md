@@ -44,7 +44,9 @@ Main API calls used by the UI:
 - `POST /api/runs/{runId}/generations` starts the first generation.
 - `GET /api/runs/{runId}/generations/current` polls generation progress.
 - `GET /api/runs/{runId}/review/current` loads the current review state.
-- `GET /api/candidates/{candidateId}/artifact` loads the current candidate SVG.
+- `GET /api/candidates/{candidateId}/thumbnail.png` loads raster candidate
+  previews for review and history.
+- `GET /api/candidates/{candidateId}/artifact` remains the source SVG artifact.
 - `POST /api/runs/{runId}/review/decisions` records survive/reject decisions.
 - `POST /api/runs/{runId}/review/undo` undoes the latest active decision.
 - `POST /api/runs/{runId}/generations/next` breeds or rerolls the next
@@ -58,7 +60,7 @@ Main API calls used by the UI:
 3. Click `Generate candidates`. The first generation targets 24 ready
    candidates. Progress shows ready count, failed attempts, total attempts,
    elapsed time, and last update time.
-4. Review the current candidate only after the artifact image loads. Buttons and
+4. Review the current candidate only after the preview image loads. Buttons and
    keyboard shortcuts are disabled until then.
 5. Use keyboard shortcuts while reviewing:
    - `j` marks the loaded candidate as survived.
@@ -85,7 +87,8 @@ generation with no survivor parents.
 ## MVP Boundaries
 
 - The webapp accepts static SVG uploads only.
-- It displays generated SVG candidate artifacts; it does not edit candidates.
+- It displays generated candidate artifacts as cached PNG previews; it does not
+  edit candidates.
 - Review decisions affect the current run's next generation only.
 - Debug metadata is local operating information, not a run dashboard.
 - Global taste/profile updates, animation, technicolour, bundle export/import,

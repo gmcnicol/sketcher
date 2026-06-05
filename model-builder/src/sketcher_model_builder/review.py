@@ -9,15 +9,21 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+import cairosvg
+
 from .generations import (
     MissingGenerationError,
     UnknownRunError,
     load_candidate_parent_links,
+    render_candidate_svg,
 )
 from .workspace import connect, ensure_workspace, new_uuid7, utc_now
 
 
 Decision = Literal["survived", "rejected"]
+THUMBNAIL_RENDER_VERSION = "preview-v1"
+THUMBNAIL_REPEATS = 3
+THUMBNAIL_SHADE_STROKES = 0
 
 
 class ReviewError(ValueError):
@@ -91,6 +97,13 @@ class ReviewState:
 
 @dataclass(frozen=True)
 class CandidateArtifact:
+    path: Path
+    sha256: str
+    byte_size: int
+
+
+@dataclass(frozen=True)
+class CandidateThumbnail:
     path: Path
     sha256: str
     byte_size: int
@@ -233,6 +246,118 @@ def load_candidate_artifact(workspace: Path, candidate_id: str) -> CandidateArti
             sha256=sha256,
             byte_size=len(data),
         )
+
+
+def load_candidate_thumbnail(
+    workspace: Path,
+    candidate_id: str,
+    *,
+    size: int,
+) -> CandidateThumbnail:
+    workspace = ensure_workspace(workspace)
+    with connect(workspace) as db:
+        candidate = load_candidate_thumbnail_row(db, candidate_id)
+    candidate_sha = candidate["sha256"]
+    if candidate_sha is None:
+        raise CandidateArtifactError("Candidate artifact metadata is incomplete.")
+    source_path = checked_source_artifact_path(
+        workspace,
+        candidate["source_artifact_path"],
+    )
+    thumbnail_directory = workspace / "artifacts" / "thumbnails"
+    thumbnail_directory.mkdir(parents=True, exist_ok=True)
+    thumbnail_path = (
+        thumbnail_directory
+        / f"{candidate_id}-{candidate_sha[:12]}-{size}-{THUMBNAIL_RENDER_VERSION}.png"
+    )
+
+    if not thumbnail_path.exists():
+        temporary_path = thumbnail_path.with_suffix(".tmp.png")
+        preview_svg_path = thumbnail_path.with_suffix(".tmp.svg")
+        try:
+            render_candidate_svg(
+                source_path,
+                preview_svg_path,
+                thumbnail_render_parameters(json.loads(candidate["genome_json"])),
+            )
+            cairosvg.svg2png(
+                url=str(preview_svg_path),
+                write_to=str(temporary_path),
+                output_width=size,
+                output_height=size,
+            )
+            temporary_path.replace(thumbnail_path)
+        except Exception as error:
+            if temporary_path.exists():
+                temporary_path.unlink()
+            raise CandidateArtifactError(
+                f"Candidate thumbnail could not be generated: {error}"
+            ) from error
+        finally:
+            if preview_svg_path.exists():
+                preview_svg_path.unlink()
+
+    data = thumbnail_path.read_bytes()
+    return CandidateThumbnail(
+        path=thumbnail_path,
+        sha256=hashlib.sha256(data).hexdigest(),
+        byte_size=len(data),
+    )
+
+
+def load_candidate_thumbnail_row(
+    db: sqlite3.Connection,
+    candidate_id: str,
+) -> sqlite3.Row:
+    candidate = db.execute(
+        """
+        SELECT candidates.*, sources.artifact_path AS source_artifact_path
+        FROM candidates
+        JOIN runs ON runs.id = candidates.run_id
+        JOIN sources ON sources.id = runs.source_id
+        WHERE candidates.id = ?
+        """,
+        (candidate_id,),
+    ).fetchone()
+    if candidate is None:
+        raise UnknownCandidateError(f"Candidate {candidate_id} was not found.")
+    if candidate["validation_status"] != "ready":
+        raise CandidateArtifactError("Candidate artifact is not available.")
+    return candidate
+
+
+def checked_source_artifact_path(workspace: Path, source_artifact_path: str) -> Path:
+    relative_path = Path(source_artifact_path)
+    if (
+        relative_path.is_absolute()
+        or ".." in relative_path.parts
+        or relative_path.parts[:2] != ("artifacts", "sources")
+    ):
+        raise CandidateArtifactError(
+            "Source artifact path is not a valid workspace-relative source path."
+        )
+
+    source_root = (workspace / "artifacts" / "sources").resolve()
+    source_path = (workspace / relative_path).resolve()
+    try:
+        source_path.relative_to(source_root)
+    except ValueError as error:
+        raise CandidateArtifactError(
+            "Source artifact path points outside the source artifact directory."
+        ) from error
+
+    if not source_path.exists() or not source_path.is_file():
+        raise CandidateArtifactError("Source artifact file is missing.")
+    return source_path
+
+
+def thumbnail_render_parameters(genome: dict[str, Any]) -> dict[str, Any]:
+    render_parameters = dict(genome.get("renderParameters", {}))
+    render_parameters["repeats"] = THUMBNAIL_REPEATS
+    render_parameters["shade_strokes"] = THUMBNAIL_SHADE_STROKES
+    render_parameters["full_retrace_interval"] = 0
+    render_parameters["flick_probability"] = 0
+    return render_parameters
 
 
 def load_current_generation_row(

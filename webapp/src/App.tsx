@@ -93,6 +93,44 @@ type ReviewResponse = {
   review: ReviewState
 }
 
+type SurvivorVideoExportStatus =
+  | 'not_started'
+  | 'queued'
+  | 'running'
+  | 'complete'
+  | 'failed'
+
+type SurvivorVideoExportFile = {
+  path: string
+  url: string
+  byteSize: number
+  sha256: string
+}
+
+type SurvivorVideoExportShort = SurvivorVideoExportFile & {
+  index: number
+  startSeconds: number
+  endSeconds: number
+}
+
+type SurvivorVideoExport = {
+  runId: string
+  status: SurvivorVideoExportStatus
+  survivorCount: number
+  holdMilliseconds: number
+  transitionMilliseconds: number
+  fps: number
+  fullVideo: SurvivorVideoExportFile | null
+  shorts: SurvivorVideoExportShort[]
+  error: string | null
+  createdAt: string | null
+  updatedAt: string | null
+}
+
+type SurvivorVideoExportResponse = {
+  export: SurvivorVideoExport
+}
+
 type ReviewDecision = 'survived' | 'rejected'
 type NextGenerationMode = 'breed' | 'reroll'
 type TerminalGenerationStatus = 'ready' | 'partial_failed'
@@ -102,6 +140,7 @@ const apiBaseUrl =
   import.meta.env.VITE_MODEL_BUILDER_URL ?? '/api'
 const generationReadyTarget = 24
 const generationPollIntervalMs = 1000
+const exportPollIntervalMs = 2000
 const thumbnailSize = 256
 const reviewImageSize = 1024
 
@@ -115,8 +154,12 @@ function App() {
   const [generationError, setGenerationError] = useState<string | null>(null)
   const [reviewError, setReviewError] = useState<string | null>(null)
   const [historyError, setHistoryError] = useState<string | null>(null)
+  const [survivorExportError, setSurvivorExportError] = useState<string | null>(null)
   const [runHistory, setRunHistory] = useState<RunHistoryEntry[]>([])
+  const [survivorExport, setSurvivorExport] =
+    useState<SurvivorVideoExport | null>(null)
   const [isLoadingHistory, setIsLoadingHistory] = useState(false)
+  const [isStartingExport, setIsStartingExport] = useState(false)
   const [activeSection, setActiveSection] = useState<AppSection>('generation')
   const [isUploading, setIsUploading] = useState(false)
   const [isGenerating, setIsGenerating] = useState(false)
@@ -224,6 +267,24 @@ function App() {
     setReview((body as ReviewResponse).review)
   }, [])
 
+  const fetchSurvivorExport = useCallback(async (runId: string) => {
+    const response = await fetch(
+      `${apiBaseUrl}/runs/${runId}/exports/survivor-video`,
+    )
+    const body = await response.json().catch(() => null)
+
+    if (response.status === 409) {
+      setSurvivorExport(null)
+      return
+    }
+
+    if (!response.ok) {
+      throw new Error(body?.detail ?? 'Survivor video export failed to load.')
+    }
+
+    setSurvivorExport((body as SurvivorVideoExportResponse).export)
+  }, [])
+
   const startGenerationProgress = useCallback(
     (actionLabel: string) => {
       generationRequestBaselineRef.current = generation?.generationNumber ?? 0
@@ -285,9 +346,11 @@ function App() {
       })
       setGeneration(latestGeneration)
       setReview(null)
+      setSurvivorExport(null)
       setError(null)
       setGenerationError(null)
       setReviewError(null)
+      setSurvivorExportError(null)
       setGenerationRequestInFlight(false)
       setGenerationStartedAt(null)
       setLastProgressAt(null)
@@ -302,8 +365,9 @@ function App() {
       ) {
         await fetchReview(historyRun.id)
       }
+      await fetchSurvivorExport(historyRun.id).catch(() => undefined)
     },
-    [fetchReview],
+    [fetchReview, fetchSurvivorExport],
   )
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -313,6 +377,7 @@ function App() {
       setResult(null)
       setGeneration(null)
       setReview(null)
+      setSurvivorExport(null)
       setGenerationRequestInFlight(false)
       setGenerationStartedAt(null)
       setLastProgressAt(null)
@@ -328,11 +393,13 @@ function App() {
     setResult(null)
     setGeneration(null)
     setReview(null)
+    setSurvivorExport(null)
     setGenerationRequestInFlight(false)
     setGenerationStartedAt(null)
     setLastProgressAt(null)
     setGenerationError(null)
     setReviewError(null)
+    setSurvivorExportError(null)
 
     try {
       const response = await fetch(`${apiBaseUrl}/sources`, {
@@ -557,6 +624,37 @@ function App() {
     ],
   )
 
+  async function startSurvivorVideoExport() {
+    if (!result || isStartingExport || survivorExport?.status === 'running') {
+      return
+    }
+
+    setIsStartingExport(true)
+    setSurvivorExportError(null)
+
+    try {
+      const response = await fetch(
+        `${apiBaseUrl}/runs/${result.run.id}/exports/survivor-video`,
+        { method: 'POST' },
+      )
+      const body = await response.json().catch(() => null)
+
+      if (!response.ok) {
+        throw new Error(body?.detail ?? 'Survivor video export failed to start.')
+      }
+
+      setSurvivorExport((body as SurvivorVideoExportResponse).export)
+    } catch (exportError) {
+      setSurvivorExportError(
+        exportError instanceof Error
+          ? exportError.message
+          : 'Survivor video export failed unexpectedly.',
+      )
+    } finally {
+      setIsStartingExport(false)
+    }
+  }
+
   useEffect(() => {
     const runId = result?.run.id
     const shouldPoll =
@@ -626,6 +724,59 @@ function App() {
     handleGenerationUpdate,
     result?.run.id,
   ])
+
+  useEffect(() => {
+    const runId = result?.run.id
+    if (!runId) {
+      return
+    }
+
+    const timeout = window.setTimeout(() => {
+      void fetchSurvivorExport(runId).catch(() => undefined)
+    }, 0)
+    return () => window.clearTimeout(timeout)
+  }, [fetchSurvivorExport, result?.run.id])
+
+  useEffect(() => {
+    const runId = result?.run.id
+    const shouldPoll =
+      runId !== undefined &&
+      (survivorExport?.status === 'queued' || survivorExport?.status === 'running')
+
+    if (!shouldPoll) {
+      return
+    }
+
+    let cancelled = false
+
+    async function pollExport() {
+      if (!runId) {
+        return
+      }
+
+      try {
+        await fetchSurvivorExport(runId)
+      } catch (exportProgressError) {
+        if (cancelled) {
+          return
+        }
+        setSurvivorExportError(
+          exportProgressError instanceof Error
+            ? exportProgressError.message
+            : 'Survivor video export progress failed unexpectedly.',
+        )
+      }
+    }
+
+    const interval = window.setInterval(
+      () => void pollExport(),
+      exportPollIntervalMs,
+    )
+    return () => {
+      cancelled = true
+      window.clearInterval(interval)
+    }
+  }, [fetchSurvivorExport, result?.run.id, survivorExport?.status])
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -771,6 +922,13 @@ function App() {
 
                     <RunDebugDisclosure result={result} />
 
+                    <SurvivorExportPanel
+                      exportState={survivorExport}
+                      error={survivorExportError}
+                      isStarting={isStartingExport}
+                      onStart={() => void startSurvivorVideoExport()}
+                    />
+
                     <button
                       className="generation-action"
                       type="button"
@@ -910,6 +1068,13 @@ type RunHistoryProps = {
   titleId: string
   onRefresh: () => void
   onOpenRun: (run: RunHistoryEntry) => void
+}
+
+type SurvivorExportPanelProps = {
+  exportState: SurvivorVideoExport | null
+  error: string | null
+  isStarting: boolean
+  onStart: () => void
 }
 
 function GenerationProgress({
@@ -1287,6 +1452,86 @@ function RunHistory({
   )
 }
 
+function SurvivorExportPanel({
+  exportState,
+  error,
+  isStarting,
+  onStart,
+}: SurvivorExportPanelProps) {
+  const isBusy =
+    isStarting ||
+    exportState?.status === 'queued' ||
+    exportState?.status === 'running'
+  const isComplete = exportState?.status === 'complete'
+  const statusLabel = exportState ? formatStatus(exportState.status) : 'Not started'
+
+  return (
+    <section className="survivor-export-panel" aria-label="Survivor video export">
+      <div className="survivor-export-header">
+        <div>
+          <p className="eyebrow">Export</p>
+          <h2>Survivor video</h2>
+        </div>
+        <span className="generation-progress-status">{statusLabel}</span>
+      </div>
+
+      <div className="survivor-export-metrics" aria-label="Export settings">
+        <AnimatedMetric
+          label="Survivors"
+          value={(exportState?.survivorCount ?? 0).toString()}
+        />
+        <AnimatedMetric
+          label="Hold"
+          value={`${exportState?.holdMilliseconds ?? 500}ms`}
+        />
+        <AnimatedMetric
+          label="Crossfade"
+          value={`${exportState?.transitionMilliseconds ?? 500}ms`}
+        />
+        <AnimatedMetric
+          label="Shorts"
+          value={isComplete ? exportState.shorts.length.toString() : 'pending'}
+        />
+      </div>
+
+      <div className="survivor-export-actions">
+        <button type="button" onClick={onStart} disabled={isBusy}>
+          {isBusy ? 'Exporting...' : isComplete ? 'Re-export survivor videos' : 'Export survivor videos'}
+        </button>
+        {isComplete && exportState.fullVideo ? (
+          <a
+            className="download-action"
+            href={apiDownloadUrl(exportState.fullVideo.url)}
+          >
+            Download 4K video
+          </a>
+        ) : null}
+      </div>
+
+      {isComplete && exportState.shorts.length > 0 ? (
+        <div className="survivor-export-shorts" aria-label="YouTube Shorts exports">
+          {exportState.shorts.map((short) => (
+            <a
+              href={apiDownloadUrl(short.url)}
+              className="secondary-download-action"
+              key={short.index}
+            >
+              Short {short.index.toString().padStart(2, '0')}
+            </a>
+          ))}
+        </div>
+      ) : null}
+
+      {error || exportState?.error ? (
+        <div className="status status-error" role="alert">
+          <span>Export error</span>
+          <p>{error ?? exportState?.error}</p>
+        </div>
+      ) : null}
+    </section>
+  )
+}
+
 function HistoryCandidate({ candidate }: { candidate: CandidateSummary }) {
   const decisionClass = candidate.reviewDecision
     ? ` history-candidate-${candidate.reviewDecision}`
@@ -1598,6 +1843,10 @@ function candidateReviewImageUrl(candidateId: string) {
   return `${apiBaseUrl}/candidates/${encodeURIComponent(
     candidateId,
   )}/thumbnail.png?size=${reviewImageSize}`
+}
+
+function apiDownloadUrl(path: string) {
+  return `${apiBaseUrl}${path}`
 }
 
 function formatByteSize(byteSize: number) {

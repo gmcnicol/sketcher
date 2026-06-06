@@ -27,6 +27,16 @@ from .generations import (
     list_run_history,
     run_history_to_api,
 )
+from .exports import (
+    ExportNotReadyError,
+    ExportToolError,
+    NoExportSurvivorsError,
+    SurvivorVideoExport,
+    SurvivorVideoExportError,
+    get_survivor_video_export,
+    load_survivor_video_export_file,
+    start_survivor_video_export,
+)
 from .workspace import (
     UploadValidationError,
     default_workspace_path,
@@ -215,6 +225,116 @@ def create_app(workspace: Path | None = None) -> FastAPI:
 
         return {"review": review_state_to_api(state)}
 
+    @app.get("/runs/{run_id}/exports/survivor-video")
+    def get_run_survivor_video_export(run_id: str) -> dict[str, object]:
+        try:
+            export = get_survivor_video_export(app.state.workspace, run_id)
+        except UnknownRunError as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=str(error),
+            ) from error
+        except NoExportSurvivorsError as error:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(error),
+            ) from error
+
+        return {"export": survivor_video_export_to_api(export)}
+
+    @app.post(
+        "/runs/{run_id}/exports/survivor-video",
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def create_run_survivor_video_export(run_id: str) -> dict[str, object]:
+        try:
+            export = start_survivor_video_export(app.state.workspace, run_id)
+        except UnknownRunError as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=str(error),
+            ) from error
+        except NoExportSurvivorsError as error:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(error),
+            ) from error
+        except ExportToolError as error:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(error),
+            ) from error
+        except SurvivorVideoExportError as error:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(error),
+            ) from error
+
+        return {"export": survivor_video_export_to_api(export)}
+
+    @app.get("/runs/{run_id}/exports/survivor-video/full.mp4")
+    def get_run_survivor_video_file(run_id: str) -> FileResponse:
+        try:
+            export_file = load_survivor_video_export_file(
+                app.state.workspace,
+                run_id,
+                "full",
+            )
+        except UnknownRunError as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=str(error),
+            ) from error
+        except (NoExportSurvivorsError, ExportNotReadyError) as error:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(error),
+            ) from error
+        except SurvivorVideoExportError as error:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(error),
+            ) from error
+
+        return FileResponse(
+            export_file.path,
+            media_type="video/mp4",
+            filename=export_file.filename,
+            headers={"X-Content-SHA256": export_file.sha256},
+        )
+
+    @app.get("/runs/{run_id}/exports/survivor-video/shorts/{short_index}.mp4")
+    def get_run_survivor_video_short(run_id: str, short_index: int) -> FileResponse:
+        try:
+            export_file = load_survivor_video_export_file(
+                app.state.workspace,
+                run_id,
+                "short",
+                short_index=short_index,
+            )
+        except UnknownRunError as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=str(error),
+            ) from error
+        except (NoExportSurvivorsError, ExportNotReadyError) as error:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(error),
+            ) from error
+        except SurvivorVideoExportError as error:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(error),
+            ) from error
+
+        return FileResponse(
+            export_file.path,
+            media_type="video/mp4",
+            filename=export_file.filename,
+            headers={"X-Content-SHA256": export_file.sha256},
+        )
+
     @app.post("/runs/{run_id}/review/decisions")
     def create_review_decision(
         run_id: str,
@@ -322,3 +442,44 @@ def create_app(workspace: Path | None = None) -> FastAPI:
         )
 
     return app
+
+
+def survivor_video_export_to_api(export: SurvivorVideoExport) -> dict[str, object]:
+    full_video_url = (
+        f"/runs/{export.run_id}/exports/survivor-video/full.mp4"
+        if export.full_video_path
+        else None
+    )
+    return {
+        "runId": export.run_id,
+        "status": export.status,
+        "survivorCount": export.survivor_count,
+        "holdMilliseconds": export.hold_milliseconds,
+        "transitionMilliseconds": export.transition_milliseconds,
+        "fps": export.fps,
+        "fullVideo": {
+            "path": export.full_video_path,
+            "url": full_video_url,
+            "byteSize": export.full_video_byte_size,
+            "sha256": export.full_video_sha256,
+        }
+        if export.full_video_path
+        else None,
+        "shorts": [
+            {
+                "index": short.index,
+                "startSeconds": short.start_seconds,
+                "endSeconds": short.end_seconds,
+                "path": short.path,
+                "url": f"/runs/{export.run_id}/exports/survivor-video/shorts/{short.index}.mp4"
+                if short.path
+                else None,
+                "byteSize": short.byte_size,
+                "sha256": short.sha256,
+            }
+            for short in export.shorts
+        ],
+        "error": export.error,
+        "createdAt": export.created_at,
+        "updatedAt": export.updated_at,
+    }

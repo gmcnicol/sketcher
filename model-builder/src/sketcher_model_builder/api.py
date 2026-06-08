@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
 
@@ -25,6 +26,7 @@ from .generations import (
     generation_summary_to_api,
     get_current_generation,
     list_run_history,
+    recover_running_generations,
     run_history_to_api,
 )
 from .exports import (
@@ -86,7 +88,14 @@ def configured_cors_origins() -> list[str]:
 
 def create_app(workspace: Path | None = None) -> FastAPI:
     resolved_workspace = ensure_workspace(workspace or default_workspace_path())
-    app = FastAPI(title="Sketcher Model Builder")
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        app.state.workspace = resolved_workspace
+        recover_running_generations(app.state.workspace)
+        yield
+
+    app = FastAPI(title="Sketcher Model Builder", lifespan=lifespan)
     app.state.workspace = resolved_workspace
 
     app.add_middleware(

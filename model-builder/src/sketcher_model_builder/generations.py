@@ -406,6 +406,277 @@ def get_current_generation(workspace: Path, run_id: str) -> GenerationSummary:
         return generation_summary_from_row(db, generation)
 
 
+def recover_running_generations(workspace: Path) -> None:
+    workspace = ensure_workspace(workspace)
+    with connect(workspace) as db:
+        rows = db.execute(
+            """
+            SELECT * FROM generations
+            WHERE status = 'running'
+            ORDER BY created_at, generation_number
+            """
+        ).fetchall()
+
+    for generation in rows:
+        recover_running_generation(workspace, generation)
+
+
+def recover_running_generation(
+    workspace: Path,
+    generation: sqlite3.Row,
+) -> None:
+    if generation["generation_number"] == 1:
+        recover_first_generation(workspace, generation)
+        return
+    recover_next_generation(workspace, generation)
+
+
+def recover_first_generation(
+    workspace: Path,
+    generation: sqlite3.Row,
+) -> None:
+    with connect(workspace) as db:
+        source_context = load_source_context(db, workspace, generation["run_id"])
+        candidates = db.execute(
+            """
+            SELECT * FROM candidates
+            WHERE generation_id = ?
+            ORDER BY position
+            """,
+            (generation["id"],),
+        ).fetchall()
+
+    ready_count = sum(
+        1 for candidate in candidates if candidate["validation_status"] == "ready"
+    )
+    next_attempt = max([candidate["position"] for candidate in candidates], default=0) + 1
+
+    for attempt in range(next_attempt, MAX_FIRST_GENERATION_ATTEMPTS + 1):
+        if ready_count >= FIRST_GENERATION_SIZE:
+            break
+        candidate_id = new_uuid7()
+        genome = build_first_generation_genome(
+            generation["run_id"],
+            attempt,
+            source_substroke_count=source_context.complexity_count,
+        )
+        validation_status, validation_message, byte_size, sha256, artifact_path = (
+            render_and_validate_candidate(
+                workspace,
+                source_context,
+                run_id=generation["run_id"],
+                generation_id=generation["id"],
+                position=attempt,
+                candidate_id=candidate_id,
+                genome=genome,
+            )
+        )
+        if validation_status == "ready":
+            ready_count += 1
+        persist_candidate(
+            workspace,
+            candidate_id=candidate_id,
+            run_id=generation["run_id"],
+            generation_id=generation["id"],
+            generation_number=generation["generation_number"],
+            position=attempt,
+            origin_type="preset_mutation",
+            genome=genome,
+            artifact_path=artifact_path,
+            byte_size=byte_size,
+            sha256=sha256,
+            validation_status=validation_status,
+            validation_message=validation_message,
+        )
+
+    update_generation_status(
+        workspace,
+        generation["id"],
+        "ready" if ready_count == FIRST_GENERATION_SIZE else "partial_failed",
+    )
+
+
+def recover_next_generation(
+    workspace: Path,
+    generation: sqlite3.Row,
+) -> None:
+    with connect(workspace) as db:
+        source_context = load_source_context(db, workspace, generation["run_id"])
+        previous_generation = db.execute(
+            """
+            SELECT * FROM generations
+            WHERE run_id = ?
+              AND generation_number = ?
+            """,
+            (generation["run_id"], generation["generation_number"] - 1),
+        ).fetchone()
+        if previous_generation is None:
+            update_generation_status(workspace, generation["id"], "partial_failed")
+            return
+
+        survivors = load_active_survivors(db, previous_generation["id"])
+        candidates = db.execute(
+            """
+            SELECT * FROM candidates
+            WHERE generation_id = ?
+            ORDER BY position
+            """,
+            (generation["id"],),
+        ).fetchall()
+
+    mode = "breed" if survivors else "reroll"
+    carryovers = survivors[:MAX_SURVIVOR_CARRYOVERS] if mode == "breed" else []
+    immigrant_target = next_generation_immigrant_target(len(survivors), mode)
+    mutation_target = NEXT_GENERATION_SIZE - immigrant_target - len(carryovers)
+    position = max([candidate["position"] for candidate in candidates], default=0) + 1
+
+    mutation_ready_count = ready_origin_count(candidates, "survivor_mutation")
+    if mutation_ready_count < mutation_target:
+        mutation_slot_offset = max_genome_slot(candidates, "survivor_mutation")
+        ready_count, position = render_next_generation_group(
+            workspace,
+            source_context=source_context,
+            run_id=generation["run_id"],
+            generation_id=generation["id"],
+            generation_number=generation["generation_number"],
+            starting_position=position,
+            target_ready_count=mutation_target - mutation_ready_count,
+            origin_type="survivor_mutation",
+            genome_builder=lambda slot: build_survivor_mutation_genome(
+                run_id=generation["run_id"],
+                generation_number=generation["generation_number"],
+                slot=mutation_slot_offset + slot,
+                parent=survivors[
+                    (mutation_slot_offset + slot - 1) % len(survivors)
+                ],
+                source_substroke_count=source_context.complexity_count,
+            ),
+        )
+        mutation_ready_count += ready_count
+
+    immigrant_ready_count = ready_origin_count(candidates, "random_immigrant")
+    if immigrant_ready_count < immigrant_target:
+        immigrant_slot_offset = max_genome_slot(candidates, "random_immigrant")
+        ready_count, position = render_next_generation_group(
+            workspace,
+            source_context=source_context,
+            run_id=generation["run_id"],
+            generation_id=generation["id"],
+            generation_number=generation["generation_number"],
+            starting_position=position,
+            target_ready_count=immigrant_target - immigrant_ready_count,
+            origin_type="random_immigrant",
+            genome_builder=lambda slot: build_random_immigrant_genome(
+                run_id=generation["run_id"],
+                generation_number=generation["generation_number"],
+                slot=immigrant_slot_offset + slot,
+                source_substroke_count=source_context.complexity_count,
+            ),
+        )
+        immigrant_ready_count += ready_count
+
+    carryover_ready_count = ready_origin_count(candidates, "survivor_carryover")
+    for parent in carryovers[carryover_ready_count:]:
+        copy_survivor_carryover(
+            workspace,
+            run_id=generation["run_id"],
+            generation_id=generation["id"],
+            generation_number=generation["generation_number"],
+            position=position,
+            parent=parent,
+        )
+        carryover_ready_count += 1
+        position += 1
+
+    ready_count = mutation_ready_count + immigrant_ready_count + carryover_ready_count
+    update_generation_status(
+        workspace,
+        generation["id"],
+        "ready" if ready_count == NEXT_GENERATION_SIZE else "partial_failed",
+    )
+
+
+def ready_origin_count(candidates: list[sqlite3.Row], origin_type: str) -> int:
+    return sum(
+        1
+        for candidate in candidates
+        if candidate["origin_type"] == origin_type
+        and candidate["validation_status"] == "ready"
+    )
+
+
+def max_genome_slot(candidates: list[sqlite3.Row], origin_type: str) -> int:
+    slot_keys = {
+        "survivor_mutation": "mutationSlot",
+        "random_immigrant": "immigrantSlot",
+    }
+    slot_key = slot_keys.get(origin_type)
+    if slot_key is None:
+        return 0
+
+    slots = []
+    for candidate in candidates:
+        if candidate["origin_type"] != origin_type:
+            continue
+        genome = json.loads(candidate["genome_json"])
+        slot = genome.get(slot_key)
+        if isinstance(slot, int):
+            slots.append(slot)
+    return max(slots, default=0)
+
+
+def render_and_validate_candidate(
+    workspace: Path,
+    source_context: SourceContext,
+    *,
+    run_id: str,
+    generation_id: str,
+    position: int,
+    candidate_id: str,
+    genome: dict[str, Any],
+) -> tuple[str, str | None, int | None, str | None, str | None]:
+    artifact_relative_path = candidate_artifact_path(
+        run_id=run_id,
+        generation_id=generation_id,
+        position=position,
+        candidate_id=candidate_id,
+    )
+    artifact_path = workspace / artifact_relative_path
+    validation_status = "ready"
+    validation_message: str | None = None
+    byte_size: int | None = None
+    sha256: str | None = None
+
+    try:
+        render_candidate_svg(
+            source_context.source_path,
+            artifact_path,
+            genome["renderParameters"],
+        )
+        validation_message = validate_candidate_svg(
+            artifact_path,
+            source_context.source_bounds,
+        )
+        data = artifact_path.read_bytes()
+        byte_size = len(data)
+        sha256 = hashlib.sha256(data).hexdigest()
+    except Exception as error:
+        validation_status = "failed"
+        validation_message = str(error) or error.__class__.__name__
+        if artifact_path.exists():
+            data = artifact_path.read_bytes()
+            byte_size = len(data)
+            sha256 = hashlib.sha256(data).hexdigest()
+
+    return (
+        validation_status,
+        validation_message,
+        byte_size,
+        sha256,
+        artifact_relative_path.as_posix() if artifact_path.exists() else None,
+    )
+
+
 def list_run_history(workspace: Path) -> list[RunHistorySummary]:
     workspace = ensure_workspace(workspace)
     with connect(workspace) as db:

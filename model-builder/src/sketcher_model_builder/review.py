@@ -21,7 +21,7 @@ from .workspace import connect, ensure_workspace, new_uuid7, utc_now
 
 
 Decision = Literal["survived", "rejected"]
-THUMBNAIL_RENDER_VERSION = "preview-v2"
+THUMBNAIL_RENDER_VERSION = "preview-v3"
 THUMBNAIL_REPEATS = 3
 THUMBNAIL_SHADE_STROKES = 0
 
@@ -356,7 +356,6 @@ def thumbnail_render_parameters(genome: dict[str, Any]) -> dict[str, Any]:
     render_parameters["repeats"] = THUMBNAIL_REPEATS
     render_parameters["shade_strokes"] = THUMBNAIL_SHADE_STROKES
     render_parameters["full_retrace_interval"] = 0
-    render_parameters["flick_probability"] = 0
     return render_parameters
 
 

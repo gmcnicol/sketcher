@@ -146,7 +146,7 @@ def test_survivor_frame_uses_candidate_preview_render_method(
     assert render_calls[0]["render_parameters"]["repeats"] == 3
     assert render_calls[0]["render_parameters"]["shade_strokes"] == 0
     assert render_calls[0]["render_parameters"]["full_retrace_interval"] == 0
-    assert render_calls[0]["render_parameters"]["flick_probability"] == 0
+    assert render_calls[0]["render_parameters"]["flick_probability"] == 0.65
     assert not render_calls[0]["artifact_path"].exists()
 
 

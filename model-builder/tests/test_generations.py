@@ -1094,6 +1094,69 @@ def test_running_next_generation_is_visible_before_request_completes(
     assert summary.ready_count == 24
 
 
+def test_startup_recovery_resumes_interrupted_next_generation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    install_fast_renderer(monkeypatch)
+    workspace = tmp_path / "workspace"
+    client = TestClient(create_app(workspace))
+    run_id = upload_source(client)["run"]["id"]
+    generation = client.post(f"/runs/{run_id}/generations").json()["generation"]
+    review_generation(client, run_id, generation["candidates"], survivor_count=13)
+
+    calls = 0
+
+    def interrupted_render_candidate_svg(
+        source_path: Path,
+        artifact_path: Path,
+        render_parameters: dict,
+    ) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 15:
+            raise SystemExit("container stopped")
+        write_valid_candidate_svg(artifact_path, render_parameters["seed"])
+
+    monkeypatch.setattr(
+        generations,
+        "render_candidate_svg",
+        interrupted_render_candidate_svg,
+    )
+    with pytest.raises(SystemExit, match="container stopped"):
+        generations.create_next_generation(workspace, run_id, mode="breed")
+
+    running_generation = client.get(f"/runs/{run_id}/generations/current").json()[
+        "generation"
+    ]
+    assert running_generation["status"] == "running"
+    assert running_generation["readyCount"] == 14
+    assert {
+        candidate["originType"] for candidate in running_generation["candidates"]
+    } == {"survivor_mutation"}
+
+    install_fast_renderer(monkeypatch)
+    generations.recover_running_generations(workspace)
+    recovered_generation = client.get(f"/runs/{run_id}/generations/current").json()[
+        "generation"
+    ]
+    ready_candidates = [
+        candidate
+        for candidate in recovered_generation["candidates"]
+        if candidate["validationStatus"] == "ready"
+    ]
+
+    assert recovered_generation["status"] == "ready"
+    assert recovered_generation["readyCount"] == 24
+    assert len(
+        [c for c in ready_candidates if c["originType"] == "survivor_mutation"]
+    ) == 14
+    assert len([c for c in ready_candidates if c["originType"] == "random_immigrant"]) == 2
+    assert len(
+        [c for c in ready_candidates if c["originType"] == "survivor_carryover"]
+    ) == 8
+
+
 def test_survivor_carryovers_are_appended_last_and_capped(
     tmp_path: Path,
     monkeypatch,

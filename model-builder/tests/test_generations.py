@@ -1136,10 +1136,10 @@ def test_startup_recovery_resumes_interrupted_next_generation(
     } == {"survivor_mutation"}
 
     install_fast_renderer(monkeypatch)
-    with TestClient(create_app(workspace)) as recovered_client:
-        recovered_generation = recovered_client.get(
-            f"/runs/{run_id}/generations/current"
-        ).json()["generation"]
+    generations.recover_running_generations(workspace)
+    recovered_generation = client.get(f"/runs/{run_id}/generations/current").json()[
+        "generation"
+    ]
     ready_candidates = [
         candidate
         for candidate in recovered_generation["candidates"]

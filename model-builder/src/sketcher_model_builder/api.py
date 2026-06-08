@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
@@ -92,7 +93,13 @@ def create_app(workspace: Path | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.workspace = resolved_workspace
-        recover_running_generations(app.state.workspace)
+        recovery_thread = threading.Thread(
+            target=recover_running_generations,
+            args=(app.state.workspace,),
+            name="generation-recovery",
+            daemon=True,
+        )
+        recovery_thread.start()
         yield
 
     app = FastAPI(title="Sketcher Model Builder", lifespan=lifespan)

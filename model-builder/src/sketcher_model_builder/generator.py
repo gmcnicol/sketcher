@@ -785,6 +785,18 @@ def smooth_path_from_points(
         c1y = y0 + (y1 - prev_y) / 6
         c2x = x1 - (next_x - x0) / 6
         c2y = y1 - (next_y - y0) / 6
+        if roughness > 0:
+            dx = x1 - x0
+            dy = y1 - y0
+            length = math.hypot(dx, dy) or 1
+            nx = -dy / length
+            ny = dx / length
+            eccentricity = roughness * min(max(length * 0.08, 0.25), 3.5)
+            bow = rng.gauss(0, eccentricity)
+            c1x += nx * bow * rng.uniform(0.45, 1.15)
+            c1y += ny * bow * rng.uniform(0.45, 1.15)
+            c2x += nx * bow * rng.uniform(-0.2, 1.05)
+            c2y += ny * bow * rng.uniform(-0.2, 1.05)
         parts.extend(["C", fmt_number(c1x), fmt_number(c1y), fmt_number(c2x), fmt_number(c2y), fmt_number(x1), fmt_number(y1)])
 
     return " ".join(parts)

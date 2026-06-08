@@ -9,6 +9,7 @@ from sketcher_model_builder.generator import (
     order_routes_by_nearest_endpoint,
     render_sketch_svg,
     route_axis,
+    smooth_path_from_points,
     stroke_routes_from_path_d,
 )
 
@@ -196,6 +197,26 @@ def test_flick_taper_emits_three_randomized_paths_per_segment(tmp_path: Path) ->
     assert min(segment_opacities["2"]) > max(segment_opacities["3"])
     assert min(min(values) for values in segment_widths.values()) >= 0.08
     assert min(min(values) for values in segment_opacities.values()) >= 0.04
+
+
+def test_two_point_strokes_get_geometric_eccentricity_from_roughness() -> None:
+    straight_path = smooth_path_from_points(
+        [(0.0, 0.0), (10.0, 0.0)],
+        random.Random(4),
+        jitter=0,
+        roughness=0,
+    )
+    eccentric_path = smooth_path_from_points(
+        [(0.0, 0.0), (10.0, 0.0)],
+        random.Random(4),
+        jitter=0,
+        roughness=0.8,
+    )
+
+    assert straight_path == "M 0 0 C 1.6667 0 8.3333 0 10 0"
+    assert eccentric_path != straight_path
+    control_values = [float(value) for value in eccentric_path.split()[5:8:2]]
+    assert any(abs(value) > 0.01 for value in control_values)
 
 
 def test_stroke_routes_can_be_ordered_by_nearest_endpoint() -> None:

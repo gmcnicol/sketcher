@@ -21,7 +21,7 @@ from .workspace import connect, ensure_workspace, new_uuid7, utc_now
 
 
 Decision = Literal["survived", "rejected"]
-THUMBNAIL_RENDER_VERSION = "preview-v1"
+THUMBNAIL_RENDER_VERSION = "preview-v2"
 THUMBNAIL_REPEATS = 3
 THUMBNAIL_SHADE_STROKES = 0
 

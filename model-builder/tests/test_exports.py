@@ -1,4 +1,5 @@
 import hashlib
+import json
 import sqlite3
 from pathlib import Path
 
@@ -64,8 +65,103 @@ def test_short_start_times_use_overlapping_sixty_second_cuts() -> None:
     assert starts[-1] + exports.SHORT_SECONDS == 130
 
 
+def test_survivor_frame_uses_candidate_preview_render_method(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    workspace = seeded_export_workspace(tmp_path)
+    survivor = exports.load_export_survivors(workspace, "run-1")[0]
+    directory = exports.export_directory(workspace, "run-1")
+    render_calls: list[dict] = []
+
+    with sqlite3.connect(workspace / "sketcher.sqlite3") as db:
+        db.execute(
+            """
+            UPDATE candidates
+            SET genome_json = ?
+            WHERE id = ?
+            """,
+            (
+                json.dumps(
+                    {
+                        "renderParameters": {
+                            "repeats": 200,
+                            "shade_strokes": 99,
+                            "full_retrace_interval": 8,
+                            "flick_probability": 0.65,
+                        }
+                    }
+                ),
+                survivor.candidate_id,
+            ),
+        )
+    survivor = exports.load_export_survivors(workspace, "run-1")[0]
+
+    def fake_render_candidate_svg(
+        source_path: Path,
+        artifact_path: Path,
+        render_parameters: dict,
+    ) -> None:
+        render_calls.append(
+            {
+                "source_path": source_path,
+                "artifact_path": artifact_path,
+                "render_parameters": render_parameters,
+            }
+        )
+        artifact_path.write_text(
+            """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">
+  <path id="preview-render" d="M 1 1 L 9 9" />
+</svg>
+""",
+            encoding="utf-8",
+        )
+
+    def fake_svg2png(
+        *,
+        url: str,
+        write_to: str,
+        output_width: int,
+        output_height: int,
+        background_color: str,
+    ) -> None:
+        assert Path(url) != workspace / survivor.artifact_path
+        assert Path(url).name.endswith(".tmp.svg")
+        assert "preview-render" in Path(url).read_text(encoding="utf-8")
+        assert output_width == exports.FULL_VIDEO_WIDTH
+        assert output_height == exports.FULL_VIDEO_HEIGHT
+        assert background_color == "white"
+        Path(write_to).write_bytes(b"\x89PNG\r\n\x1a\nframe")
+
+    monkeypatch.setattr(exports, "render_candidate_svg", fake_render_candidate_svg)
+    monkeypatch.setattr(exports.cairosvg, "svg2png", fake_svg2png)
+
+    frame = exports.render_survivor_frame(workspace, directory, survivor)
+
+    assert frame.exists()
+    assert frame.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+    assert len(render_calls) == 1
+    assert render_calls[0]["source_path"].parts[-2] == "sources"
+    assert render_calls[0]["artifact_path"].name.endswith(".tmp.svg")
+    assert render_calls[0]["render_parameters"]["repeats"] == 3
+    assert render_calls[0]["render_parameters"]["shade_strokes"] == 0
+    assert render_calls[0]["render_parameters"]["full_retrace_interval"] == 0
+    assert render_calls[0]["render_parameters"]["flick_probability"] == 0
+    assert not render_calls[0]["artifact_path"].exists()
+
+
 def seeded_export_workspace(tmp_path: Path) -> Path:
     workspace = ensure_workspace(tmp_path / "workspace")
+    source_path = Path("artifacts/sources/source.svg")
+    source_artifact = workspace / source_path
+    source_artifact.parent.mkdir(parents=True, exist_ok=True)
+    source_artifact.write_text(
+        """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">
+  <path id="source" d="M 1 1 L 9 9" />
+</svg>
+""",
+        encoding="utf-8",
+    )
     artifact_path = Path("artifacts/candidates/run-1/generation-1")
     artifact_directory = workspace / artifact_path
     artifact_directory.mkdir(parents=True)
@@ -94,9 +190,9 @@ def seeded_export_workspace(tmp_path: Path) -> Path:
                 "source-1",
                 "source.svg",
                 "image/svg+xml",
-                10,
-                "a" * 64,
-                "artifacts/sources/source.svg",
+                source_artifact.stat().st_size,
+                hashlib.sha256(source_artifact.read_bytes()).hexdigest(),
+                source_path.as_posix(),
                 "2026-06-06T00:00:00+00:00",
             ),
         )

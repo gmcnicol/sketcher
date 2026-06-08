@@ -15,6 +15,12 @@ from typing import Literal
 import cairosvg
 
 from .generations import UnknownRunError
+from .review import (
+    THUMBNAIL_RENDER_VERSION,
+    checked_source_artifact_path,
+    render_candidate_svg,
+    thumbnail_render_parameters,
+)
 from .workspace import connect, ensure_workspace, utc_now
 
 
@@ -32,6 +38,7 @@ SHORT_SECONDS = 60.0
 SHORT_OVERLAP_SECONDS = 5.0
 VIDEO_CRF = "18"
 VIDEO_PRESET = "veryfast"
+SURVIVOR_FRAME_RENDER_VERSION = THUMBNAIL_RENDER_VERSION
 
 _JOBS: dict[Path, dict[str, ExportStatusValue]] = {}
 _JOBS_LOCK = threading.Lock()
@@ -63,6 +70,8 @@ class ExportSurvivor:
     origin_type: str
     artifact_path: str
     sha256: str
+    genome_json: str
+    source_artifact_path: str
 
 
 @dataclass(frozen=True)
@@ -258,9 +267,13 @@ def load_export_survivors(workspace: Path, run_id: str) -> list[ExportSurvivor]:
                 c.id AS candidate_id,
                 c.origin_type,
                 c.artifact_path,
-                c.sha256
+                c.sha256,
+                c.genome_json,
+                s.artifact_path AS source_artifact_path
             FROM candidate_decisions d
             JOIN candidates c ON c.id = d.candidate_id
+            JOIN runs r ON r.id = c.run_id
+            JOIN sources s ON s.id = r.source_id
             WHERE d.run_id = ?
               AND d.decision = 'survived'
               AND d.undone_at IS NULL
@@ -287,6 +300,8 @@ def load_export_survivors(workspace: Path, run_id: str) -> list[ExportSurvivor]:
             origin_type=row["origin_type"],
             artifact_path=row["artifact_path"],
             sha256=row["sha256"],
+            genome_json=row["genome_json"],
+            source_artifact_path=row["source_artifact_path"],
         )
         for index, row in enumerate(rows, start=1)
     ]
@@ -297,15 +312,22 @@ def render_survivor_frame(
     directory: Path,
     item: ExportSurvivor,
 ) -> Path:
-    source = checked_candidate_artifact_path(workspace, item)
+    checked_candidate_artifact_path(workspace, item)
+    source = checked_source_artifact_path(workspace, item.source_artifact_path)
     frame_path = frames_directory(directory) / f"{item.index:04d}-{item.candidate_id}.png"
     if frame_path.exists():
         return frame_path
     frame_path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = frame_path.with_suffix(".tmp.png")
+    preview_svg_path = frame_path.with_suffix(".tmp.svg")
     try:
+        render_candidate_svg(
+            source,
+            preview_svg_path,
+            thumbnail_render_parameters(json.loads(item.genome_json)),
+        )
         cairosvg.svg2png(
-            url=str(source),
+            url=str(preview_svg_path),
             write_to=str(temporary_path),
             output_width=FULL_VIDEO_WIDTH,
             output_height=FULL_VIDEO_HEIGHT,
@@ -316,6 +338,9 @@ def render_survivor_frame(
         if temporary_path.exists():
             temporary_path.unlink()
         raise
+    finally:
+        if preview_svg_path.exists():
+            preview_svg_path.unlink()
     return frame_path
 
 
@@ -709,19 +734,19 @@ def export_directory(workspace: Path, run_id: str) -> Path:
 
 
 def frames_directory(directory: Path) -> Path:
-    return directory / "frames-4k-landscape"
+    return directory / f"frames-4k-landscape-{SURVIVOR_FRAME_RENDER_VERSION}"
 
 
 def segments_directory(directory: Path) -> Path:
-    return directory / "segments-4k-landscape"
+    return directory / f"segments-4k-landscape-{SURVIVOR_FRAME_RENDER_VERSION}"
 
 
 def shorts_directory(directory: Path) -> Path:
-    return directory / "youtube-shorts-4k"
+    return directory / f"youtube-shorts-4k-{SURVIVOR_FRAME_RENDER_VERSION}"
 
 
 def full_video_path(directory: Path) -> Path:
-    return directory / "run-survivors-over-time-4k.mp4"
+    return directory / f"run-survivors-over-time-4k-{SURVIVOR_FRAME_RENDER_VERSION}.mp4"
 
 
 def manifest_path(directory: Path) -> Path:

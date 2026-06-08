@@ -21,9 +21,10 @@ from .workspace import connect, ensure_workspace, new_uuid7, utc_now
 
 
 Decision = Literal["survived", "rejected"]
-THUMBNAIL_RENDER_VERSION = "preview-v3"
+THUMBNAIL_RENDER_VERSION = "preview-v5"
 THUMBNAIL_REPEATS = 3
 THUMBNAIL_SHADE_STROKES = 0
+THUMBNAIL_FLICK_SEGMENT_STROKE_COPIES = 1
 
 
 class ReviewError(ValueError):
@@ -356,6 +357,9 @@ def thumbnail_render_parameters(genome: dict[str, Any]) -> dict[str, Any]:
     render_parameters["repeats"] = THUMBNAIL_REPEATS
     render_parameters["shade_strokes"] = THUMBNAIL_SHADE_STROKES
     render_parameters["full_retrace_interval"] = 0
+    render_parameters["flick_segment_stroke_copies"] = (
+        THUMBNAIL_FLICK_SEGMENT_STROKE_COPIES
+    )
     return render_parameters
 
 

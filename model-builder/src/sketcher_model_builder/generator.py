@@ -1423,6 +1423,7 @@ def sketch_paths(
     flick_probability: float,
     flick_min_width: float,
     flick_min_opacity: float,
+    flick_segment_stroke_copies: int,
     rng: random.Random,
 ) -> int:
     defs = get_or_create_defs(root)
@@ -1549,7 +1550,7 @@ def sketch_paths(
                     flick_bias=pass_flick_bias,
                     flick_curve=flick_curve,
                 )
-                for copy_index in range(FLICK_SEGMENT_STROKE_COPIES):
+                for copy_index in range(flick_segment_stroke_copies):
                     segment = deepcopy(copy)
                     segment.set(
                         "id",
@@ -1574,6 +1575,7 @@ def sketch_paths(
                             min(1, base_opacity * taper * opacity_variation),
                         )
                     )
+                    segment_style["stroke-linecap"] = "butt"
                     segment.set("style", dict_to_style(segment_style))
                     group.append(segment)
 
@@ -1611,6 +1613,7 @@ def render_sketch_svg(
     flick_probability: float = 0.65,
     flick_min_width: float = 0.08,
     flick_min_opacity: float = 0.04,
+    flick_segment_stroke_copies: int = FLICK_SEGMENT_STROKE_COPIES,
 ) -> int:
     if repeats < 1:
         raise ValueError("repeats must be at least 1")
@@ -1658,6 +1661,8 @@ def render_sketch_svg(
         raise ValueError("flick_min_width must be greater than 0")
     if not 0 < flick_min_opacity <= 1:
         raise ValueError("flick_min_opacity must be greater than 0 and no more than 1")
+    if flick_segment_stroke_copies < 1:
+        raise ValueError("flick_segment_stroke_copies must be at least 1")
 
     register_namespaces()
     tree = ET.parse(input_path)
@@ -1690,6 +1695,7 @@ def render_sketch_svg(
         flick_probability=flick_probability,
         flick_min_width=flick_min_width,
         flick_min_opacity=flick_min_opacity,
+        flick_segment_stroke_copies=flick_segment_stroke_copies,
         rng=random.Random(seed),
     )
 
@@ -1752,6 +1758,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--flick-probability", type=float, default=0.65, help="Chance that a retrace pass is emitted as tapered segments")
     parser.add_argument("--flick-min-width", type=float, default=0.08, help="Minimum stroke width for tapered segment output")
     parser.add_argument("--flick-min-opacity", type=float, default=0.04, help="Minimum stroke opacity for tapered segment output")
+    parser.add_argument("--flick-segment-stroke-copies", type=int, default=FLICK_SEGMENT_STROKE_COPIES, help="Number of randomized pencil paths emitted for each tapered segment")
     parser.add_argument(
         "--keep-original",
         action="store_true",
@@ -1791,6 +1798,7 @@ def main() -> None:
             flick_probability=args.flick_probability,
             flick_min_width=args.flick_min_width,
             flick_min_opacity=args.flick_min_opacity,
+            flick_segment_stroke_copies=args.flick_segment_stroke_copies,
         )
     except (ET.ParseError, ValueError) as error:
         raise SystemExit(str(error)) from error

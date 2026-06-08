@@ -184,6 +184,7 @@ def test_flick_taper_emits_three_randomized_paths_per_segment(tmp_path: Path) ->
     for element in segment_paths:
         segment_index = (element.get("id") or "").split("-segment-", 1)[1].split("-", 1)[0]
         style = style_to_dict(element.get("style"))
+        assert style["stroke-linecap"] == "butt"
         segment_widths[segment_index].append(float(style["stroke-width"]))
         segment_opacities[segment_index].append(float(style["stroke-opacity"]))
         segment_ds[segment_index].add(element.get("d", ""))
@@ -197,6 +198,48 @@ def test_flick_taper_emits_three_randomized_paths_per_segment(tmp_path: Path) ->
     assert min(segment_opacities["2"]) > max(segment_opacities["3"])
     assert min(min(values) for values in segment_widths.values()) >= 0.08
     assert min(min(values) for values in segment_opacities.values()) >= 0.04
+
+
+def test_flick_taper_can_emit_one_path_per_segment_for_previews(tmp_path: Path) -> None:
+    input_svg = tmp_path / "source.svg"
+    output_svg = tmp_path / "out.svg"
+    input_svg.write_text(
+        """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 10">
+  <path id="line" d="M 0 5 L 10 5 L 20 5 L 30 5" style="fill:none;stroke:#000;stroke-width:1" />
+</svg>
+""",
+        encoding="utf-8",
+    )
+
+    render_sketch_svg(
+        input_svg,
+        output_svg,
+        mode="stroke",
+        repeats=1,
+        shade_strokes=0,
+        jitter=0.05,
+        roughness=0.05,
+        stroke_width=1.0,
+        opacity=0.5,
+        seed=3,
+        flick_strength=1,
+        flick_bias="start",
+        flick_curve="linear",
+        flick_probability=1,
+        flick_min_width=0.08,
+        flick_min_opacity=0.04,
+        flick_segment_stroke_copies=1,
+    )
+
+    root = ET.parse(output_svg).getroot()
+    segment_paths = [
+        element
+        for element in root.iter()
+        if element.get("data-sketcher-pass") == "1"
+    ]
+
+    assert len(segment_paths) == 3
+    assert all("-segment-" in (element.get("id") or "") for element in segment_paths)
 
 
 def test_two_point_strokes_get_geometric_eccentricity_from_roughness() -> None:

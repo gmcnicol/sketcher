@@ -419,6 +419,10 @@ describe('App MVP flow', () => {
     vi.stubGlobal('Image', PrefetchImage)
 
     const user = userEvent.setup()
+    let releaseHistoryRefresh: () => void = () => undefined
+    const slowHistoryRefresh = new Promise<void>((resolve) => {
+      releaseHistoryRefresh = resolve
+    })
     const candidates = [
       candidate({ id: 'candidate-1', position: 1 }),
       candidate({ id: 'candidate-2', position: 2 }),
@@ -444,6 +448,7 @@ describe('App MVP flow', () => {
           rejectedCount: 1,
         }),
       ],
+      historyDelayAfterReview: () => slowHistoryRefresh,
     })
     render(<App />)
 
@@ -467,6 +472,7 @@ describe('App MVP flow', () => {
     await waitFor(() =>
       expect(screen.getByRole('button', { name: /reject/i })).not.toBeDisabled(),
     )
+    releaseHistoryRefresh()
 
     await user.keyboard('k')
     await screen.findByRole('img', { name: /^candidate 3 preview$/i })
@@ -724,6 +730,7 @@ type FetchScenario = {
   nextGeneration?: Generation
   nextReview?: Review
   historyRuns?: RunHistoryEntry[]
+  historyDelayAfterReview?: () => Promise<void>
   survivorExport?: SurvivorVideoExport | null
   startedSurvivorExport?: SurvivorVideoExport
 }
@@ -740,12 +747,14 @@ function installFetch({
   nextGeneration,
   nextReview,
   historyRuns = [],
+  historyDelayAfterReview,
   survivorExport = null,
   startedSurvivorExport = survivorVideoExport({ status: 'queued' }),
 }: FetchScenario = {}) {
   let currentGeneration: Generation | null = null
   let currentReview = firstReview
   let currentSurvivorExport = survivorExport
+  let reviewMutationCount = 0
   const queuedDecisionReviews = [...decisionReviews]
   const queuedUndoReviews = [...undoReviews]
 
@@ -754,6 +763,9 @@ function installFetch({
     const method = init?.method ?? 'GET'
 
     if (url === '/api/runs' && method === 'GET') {
+      if (reviewMutationCount > 0 && historyDelayAfterReview) {
+        await historyDelayAfterReview()
+      }
       return jsonResponse({ runs: historyRuns })
     }
 
@@ -818,11 +830,13 @@ function installFetch({
 
     if (url === `/api/runs/${run.id}/review/decisions` && method === 'POST') {
       currentReview = queuedDecisionReviews.shift() ?? currentReview
+      reviewMutationCount += 1
       return jsonResponse({ review: currentReview })
     }
 
     if (url === `/api/runs/${run.id}/review/undo` && method === 'POST') {
       currentReview = queuedUndoReviews.shift() ?? currentReview
+      reviewMutationCount += 1
       return jsonResponse({ review: currentReview })
     }
 

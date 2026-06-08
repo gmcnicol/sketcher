@@ -522,14 +522,15 @@ function App() {
         const nextReview = (body as ReviewResponse).review
         setReview(nextReview)
         updateGenerationReviewState(nextReview, review.currentCandidate.id, decision)
-        await fetchRunHistory()
+        setIsReviewing(false)
+        reviewActionInFlightRef.current = false
+        void fetchRunHistory()
       } catch (decisionError) {
         setReviewError(
           decisionError instanceof Error
             ? decisionError.message
             : 'Review decision failed unexpectedly.',
         )
-      } finally {
         setIsReviewing(false)
         reviewActionInFlightRef.current = false
       }
@@ -577,12 +578,13 @@ function App() {
         nextReview.currentCandidate?.id ?? null,
         null,
       )
-      await fetchRunHistory()
+      setIsReviewing(false)
+      reviewActionInFlightRef.current = false
+      void fetchRunHistory()
     } catch (undoError) {
       setReviewError(
         undoError instanceof Error ? undoError.message : 'Undo failed unexpectedly.',
       )
-    } finally {
       setIsReviewing(false)
       reviewActionInFlightRef.current = false
     }

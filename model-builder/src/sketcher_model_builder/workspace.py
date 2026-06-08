@@ -76,6 +76,7 @@ def ensure_workspace(workspace: Path) -> Path:
         workspace / "artifacts" / "sources",
         workspace / "artifacts" / "candidates",
         workspace / "artifacts" / "thumbnails",
+        workspace / "artifacts" / "exports",
         workspace / "models",
     ):
         directory.mkdir(parents=True, exist_ok=True)

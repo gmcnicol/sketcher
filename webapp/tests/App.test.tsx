@@ -110,6 +110,33 @@ type RunHistoryEntry = {
   generations: Generation[]
 }
 
+type SurvivorVideoExport = {
+  runId: string
+  status: 'not_started' | 'queued' | 'running' | 'complete' | 'failed'
+  survivorCount: number
+  holdMilliseconds: number
+  transitionMilliseconds: number
+  fps: number
+  fullVideo: {
+    path: string
+    url: string
+    byteSize: number
+    sha256: string
+  } | null
+  shorts: Array<{
+    index: number
+    startSeconds: number
+    endSeconds: number
+    path: string
+    url: string
+    byteSize: number
+    sha256: string
+  }>
+  error: string | null
+  createdAt: string | null
+  updatedAt: string | null
+}
+
 const source = {
   id: '019b0000-0000-7000-8000-000000000001',
   filename: 'source.svg',
@@ -457,6 +484,48 @@ describe('App MVP flow', () => {
 
     await waitFor(() => expect(nextGenerationBodies(fetchMock)).toEqual([{ mode: 'reroll' }]))
   })
+
+  it('starts survivor video export and shows completed downloads', async () => {
+    const user = userEvent.setup()
+    const completedExport = survivorVideoExport({
+      status: 'complete',
+      survivorCount: 2,
+      fullVideo: {
+        path: 'artifacts/exports/survivor-videos/run/full.mp4',
+        url: `/runs/${run.id}/exports/survivor-video/full.mp4`,
+        byteSize: 2048,
+        sha256: 'c'.repeat(64),
+      },
+      shorts: [
+        {
+          index: 1,
+          startSeconds: 0,
+          endSeconds: 60,
+          path: 'artifacts/exports/survivor-videos/run/short-1.mp4',
+          url: `/runs/${run.id}/exports/survivor-video/shorts/1.mp4`,
+          byteSize: 1024,
+          sha256: 'd'.repeat(64),
+        },
+      ],
+    })
+    const fetchMock = installFetch({
+      startedSurvivorExport: completedExport,
+    })
+    render(<App />)
+
+    await uploadSourceSvg(user)
+    await user.click(screen.getByRole('button', { name: /export survivor videos/i }))
+
+    expect(exportStartCallCount(fetchMock)).toBe(1)
+    expect(await screen.findByRole('link', { name: /download 4k video/i })).toHaveAttribute(
+      'href',
+      `/api/runs/${run.id}/exports/survivor-video/full.mp4`,
+    )
+    expect(screen.getByRole('link', { name: /short 01/i })).toHaveAttribute(
+      'href',
+      `/api/runs/${run.id}/exports/survivor-video/shorts/1.mp4`,
+    )
+  })
 })
 
 async function uploadSourceSvg(user: ReturnType<typeof userEvent.setup>) {
@@ -552,6 +621,25 @@ function runHistory(overrides: Partial<RunHistoryEntry> = {}): RunHistoryEntry {
   }
 }
 
+function survivorVideoExport(
+  overrides: Partial<SurvivorVideoExport> = {},
+): SurvivorVideoExport {
+  return {
+    runId: run.id,
+    status: 'not_started',
+    survivorCount: 0,
+    holdMilliseconds: 500,
+    transitionMilliseconds: 500,
+    fps: 30,
+    fullVideo: null,
+    shorts: [],
+    error: null,
+    createdAt: null,
+    updatedAt: null,
+    ...overrides,
+  }
+}
+
 type FetchScenario = {
   generation?: Generation
   review?: Review
@@ -560,6 +648,8 @@ type FetchScenario = {
   nextGeneration?: Generation
   nextReview?: Review
   historyRuns?: RunHistoryEntry[]
+  survivorExport?: SurvivorVideoExport | null
+  startedSurvivorExport?: SurvivorVideoExport
 }
 
 function installFetch({
@@ -574,9 +664,12 @@ function installFetch({
   nextGeneration,
   nextReview,
   historyRuns = [],
+  survivorExport = null,
+  startedSurvivorExport = survivorVideoExport({ status: 'queued' }),
 }: FetchScenario = {}) {
   let currentGeneration: Generation | null = null
   let currentReview = firstReview
+  let currentSurvivorExport = survivorExport
   const queuedDecisionReviews = [...decisionReviews]
   const queuedUndoReviews = [...undoReviews]
 
@@ -607,6 +700,27 @@ function installFetch({
 
     if (url === `/api/runs/${run.id}/review/current` && method === 'GET') {
       return jsonResponse({ review: currentReview })
+    }
+
+    if (
+      url === `/api/runs/${run.id}/exports/survivor-video` &&
+      method === 'GET'
+    ) {
+      if (!currentSurvivorExport) {
+        return jsonResponse(
+          { detail: 'Run has no active ready survivors to export.' },
+          409,
+        )
+      }
+      return jsonResponse({ export: currentSurvivorExport })
+    }
+
+    if (
+      url === `/api/runs/${run.id}/exports/survivor-video` &&
+      method === 'POST'
+    ) {
+      currentSurvivorExport = startedSurvivorExport
+      return jsonResponse({ export: currentSurvivorExport }, 202)
     }
 
     if (url === `/api/runs/${run.id}/review/decisions` && method === 'POST') {
@@ -656,4 +770,12 @@ function requestBodies(fetchMock: ReturnType<typeof installFetch>, path: string)
 function undoCallCount(fetchMock: ReturnType<typeof installFetch>) {
   return fetchMock.mock.calls.filter(([url]) => String(url).includes('/review/undo'))
     .length
+}
+
+function exportStartCallCount(fetchMock: ReturnType<typeof installFetch>) {
+  return fetchMock.mock.calls.filter(
+    ([url, init]) =>
+      String(url).includes('/exports/survivor-video') &&
+      (init?.method ?? 'GET') === 'POST',
+  ).length
 }

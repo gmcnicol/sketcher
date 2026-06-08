@@ -338,7 +338,7 @@ def test_candidate_thumbnail_endpoint_serves_cached_png(
     assert render_calls[0]["render_parameters"]["repeats"] == 3
     assert render_calls[0]["render_parameters"]["shade_strokes"] == 0
     assert render_calls[0]["render_parameters"]["full_retrace_interval"] == 0
-    assert render_calls[0]["render_parameters"]["flick_probability"] == 0
+    assert render_calls[0]["render_parameters"]["flick_probability"] == 0.65
 
 
 def test_candidate_artifact_endpoint_rejects_missing_artifacts(

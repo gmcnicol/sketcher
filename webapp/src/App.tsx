@@ -177,6 +177,9 @@ function App() {
   const [loadedCandidateImageId, setLoadedCandidateImageId] = useState<string | null>(
     null,
   )
+  const [prefetchedReviewCandidateIds, setPrefetchedReviewCandidateIds] = useState(
+    () => new Set<string>(),
+  )
   const generationActionInFlightRef = useRef(false)
   const generationRequestBaselineRef = useRef(0)
   const reviewedTerminalGenerationRef = useRef<string | null>(null)
@@ -192,7 +195,9 @@ function App() {
   }, [selectedFile])
   const currentCandidate = review?.currentCandidate ?? null
   const candidateImageLoaded =
-    currentCandidate !== null && loadedCandidateImageId === currentCandidate.id
+    currentCandidate !== null &&
+    (loadedCandidateImageId === currentCandidate.id ||
+      prefetchedReviewCandidateIds.has(currentCandidate.id))
   const generationIsReviewable =
     generation !== null &&
     isTerminalGenerationStatus(generation.status) &&
@@ -781,14 +786,43 @@ function App() {
       return
     }
 
-    const urls = readyCandidates.slice(
+    const candidatesToPrefetch = readyCandidates.slice(
       currentIndex,
       currentIndex + reviewPrefetchCount,
-    ).flatMap((candidateItem) => [
-      candidateReviewImageUrl(candidateItem.id),
-      candidateThumbnailUrl(candidateItem.id),
-    ])
-    return prefetchImagesSequentially(urls)
+    )
+    let cancelled = false
+
+    async function run() {
+      for (const candidateItem of candidatesToPrefetch) {
+        if (cancelled) {
+          return
+        }
+
+        const reviewImageLoaded = await prefetchImage(
+          candidateReviewImageUrl(candidateItem.id),
+        )
+        if (!cancelled && reviewImageLoaded) {
+          setPrefetchedReviewCandidateIds((currentIds) => {
+            if (currentIds.has(candidateItem.id)) {
+              return currentIds
+            }
+            const nextIds = new Set(currentIds)
+            nextIds.add(candidateItem.id)
+            return nextIds
+          })
+        }
+
+        if (cancelled) {
+          return
+        }
+        await prefetchImage(candidateThumbnailUrl(candidateItem.id))
+      }
+    }
+
+    void run()
+    return () => {
+      cancelled = true
+    }
   }, [generation, review?.currentCandidate])
 
   useEffect(() => {
@@ -1899,36 +1933,18 @@ function candidateReviewImageUrl(candidateId: string) {
   )}/thumbnail.png?size=${reviewImageSize}`
 }
 
-function prefetchImage(url: string): Promise<void> {
+function prefetchImage(url: string): Promise<boolean> {
   if (typeof window === 'undefined' || typeof window.Image === 'undefined') {
-    return Promise.resolve()
+    return Promise.resolve(false)
   }
 
   return new Promise((resolve) => {
     const image = new window.Image()
     image.decoding = 'async'
-    image.onload = () => resolve()
-    image.onerror = () => resolve()
+    image.onload = () => resolve(true)
+    image.onerror = () => resolve(false)
     image.src = url
   })
-}
-
-function prefetchImagesSequentially(urls: string[]) {
-  let cancelled = false
-
-  async function run() {
-    for (const url of urls) {
-      if (cancelled) {
-        return
-      }
-      await prefetchImage(url)
-    }
-  }
-
-  void run()
-  return () => {
-    cancelled = true
-  }
 }
 
 function apiDownloadUrl(path: string) {

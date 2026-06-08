@@ -152,6 +152,7 @@ const run = {
 const uploadResponse = { source, run }
 
 beforeEach(() => {
+  vi.unstubAllGlobals()
   vi.restoreAllMocks()
   vi.useRealTimers()
 })
@@ -399,6 +400,70 @@ describe('App MVP flow', () => {
     await screen.findByRole('img', { name: /^candidate 2 preview$/i })
     expect(await screen.findByLabelText('Candidate 2 current')).toBeTruthy()
     expect(undoCallCount(fetchMock)).toBe(1)
+  })
+
+  it('accepts review actions immediately when the next candidate image was prefetched', async () => {
+    class PrefetchImage {
+      decoding = ''
+      onload: (() => void) | null = null
+      onerror: (() => void) | null = null
+
+      set src(_url: string) {
+        queueMicrotask(() => this.onload?.())
+      }
+    }
+
+    vi.stubGlobal('Image', PrefetchImage)
+
+    const user = userEvent.setup()
+    const candidates = [
+      candidate({ id: 'candidate-1', position: 1 }),
+      candidate({ id: 'candidate-2', position: 2 }),
+      candidate({ id: 'candidate-3', position: 3 }),
+    ]
+    const fetchMock = installFetch({
+      generation: generation({ candidates }),
+      review: review({ currentCandidate: candidates[0] }),
+      decisionReviews: [
+        review({
+          currentCandidate: candidates[1],
+          currentIndex: 2,
+          reviewedCount: 1,
+          survivorCount: 1,
+        }),
+        review({
+          currentCandidate: candidates[2],
+          currentIndex: 3,
+          reviewedCount: 2,
+          survivorCount: 1,
+          rejectedCount: 1,
+        }),
+      ],
+    })
+    render(<App />)
+
+    await uploadSourceSvg(user)
+    await user.click(screen.getByRole('button', { name: /generate candidates/i }))
+    const firstImage = await screen.findByRole('img', {
+      name: /^candidate 1 preview$/i,
+    })
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /survive/i })).not.toBeDisabled(),
+    )
+
+    fireEvent.load(firstImage)
+    await user.keyboard('j')
+    await screen.findByRole('img', { name: /^candidate 2 preview$/i })
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /reject/i })).not.toBeDisabled(),
+    )
+
+    await user.keyboard('k')
+    await screen.findByRole('img', { name: /^candidate 3 preview$/i })
+    expect(decisionBodies(fetchMock)).toEqual([
+      { candidateId: 'candidate-1', decision: 'survived' },
+      { candidateId: 'candidate-2', decision: 'rejected' },
+    ])
   })
 
   it('routes low-diversity completed reviews to breed the next generation', async () => {

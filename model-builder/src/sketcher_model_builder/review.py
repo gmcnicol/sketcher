@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -25,6 +26,9 @@ THUMBNAIL_RENDER_VERSION = "preview-v5"
 THUMBNAIL_REPEATS = 3
 THUMBNAIL_SHADE_STROKES = 0
 THUMBNAIL_FLICK_SEGMENT_STROKE_COPIES = 1
+THUMBNAIL_PREWARM_SIZES = (256, 1024)
+_THUMBNAIL_PREWARM_JOBS: set[tuple[Path, str, str, tuple[int, ...]]] = set()
+_THUMBNAIL_PREWARM_LOCK = threading.Lock()
 
 
 class ReviewError(ValueError):
@@ -108,6 +112,14 @@ class CandidateThumbnail:
     path: Path
     sha256: str
     byte_size: int
+
+
+@dataclass(frozen=True)
+class ThumbnailPrewarm:
+    generation_id: str
+    candidate_count: int
+    sizes: tuple[int, ...]
+    status: Literal["running", "queued"]
 
 
 def get_current_review_state(workspace: Path, run_id: str) -> ReviewState:
@@ -304,6 +316,84 @@ def load_candidate_thumbnail(
         sha256=hashlib.sha256(data).hexdigest(),
         byte_size=len(data),
     )
+
+
+def start_review_thumbnail_prewarm(
+    workspace: Path,
+    run_id: str,
+    *,
+    sizes: tuple[int, ...] = THUMBNAIL_PREWARM_SIZES,
+) -> ThumbnailPrewarm:
+    workspace = ensure_workspace(workspace)
+    normalized_sizes = tuple(sorted(set(sizes)))
+    if any(size < 64 or size > 1024 for size in normalized_sizes):
+        raise CandidateArtifactError("Thumbnail prewarm sizes must be between 64 and 1024.")
+
+    with connect(workspace) as db:
+        generation = load_current_generation_row(db, run_id)
+        validate_generation_ready_for_review(generation)
+        rows = db.execute(
+            """
+            SELECT id FROM candidates
+            WHERE run_id = ?
+              AND generation_id = ?
+              AND validation_status = 'ready'
+            ORDER BY position
+            """,
+            (run_id, generation["id"]),
+        ).fetchall()
+
+    candidate_ids = [row["id"] for row in rows]
+    key = (
+        workspace.resolve(),
+        run_id,
+        generation["id"],
+        normalized_sizes,
+    )
+    with _THUMBNAIL_PREWARM_LOCK:
+        if key in _THUMBNAIL_PREWARM_JOBS:
+            return ThumbnailPrewarm(
+                generation_id=generation["id"],
+                candidate_count=len(candidate_ids),
+                sizes=normalized_sizes,
+                status="running",
+            )
+        _THUMBNAIL_PREWARM_JOBS.add(key)
+
+    thread = threading.Thread(
+        target=run_thumbnail_prewarm_job,
+        args=(workspace, run_id, generation["id"], candidate_ids, normalized_sizes, key),
+        name=f"thumbnail-prewarm-{run_id[:8]}",
+        daemon=True,
+    )
+    thread.start()
+    return ThumbnailPrewarm(
+        generation_id=generation["id"],
+        candidate_count=len(candidate_ids),
+        sizes=normalized_sizes,
+        status="queued",
+    )
+
+
+def run_thumbnail_prewarm_job(
+    workspace: Path,
+    run_id: str,
+    generation_id: str,
+    candidate_ids: list[str],
+    sizes: tuple[int, ...],
+    key: tuple[Path, str, str, tuple[int, ...]],
+) -> None:
+    try:
+        for candidate_id in candidate_ids:
+            with connect(workspace) as db:
+                active_generation = load_current_generation_row(db, run_id)
+                if active_generation["id"] != generation_id:
+                    return
+            for size in sizes:
+                load_candidate_thumbnail(workspace, candidate_id, size=size)
+    finally:
+        with _THUMBNAIL_PREWARM_LOCK:
+            _THUMBNAIL_PREWARM_JOBS.discard(key)
 
 
 def load_candidate_thumbnail_row(

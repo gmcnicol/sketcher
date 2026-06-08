@@ -58,6 +58,7 @@ from .review import (
     load_candidate_thumbnail,
     record_candidate_decision,
     review_state_to_api,
+    start_review_thumbnail_prewarm,
     undo_latest_decision,
 )
 
@@ -224,6 +225,38 @@ def create_app(workspace: Path | None = None) -> FastAPI:
             ) from error
 
         return {"review": review_state_to_api(state)}
+
+    @app.post(
+        "/runs/{run_id}/review/thumbnails/prewarm",
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def create_review_thumbnail_prewarm(run_id: str) -> dict[str, object]:
+        try:
+            prewarm = start_review_thumbnail_prewarm(app.state.workspace, run_id)
+        except (UnknownRunError, MissingGenerationError) as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=str(error),
+            ) from error
+        except GenerationRunningError as error:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(error),
+            ) from error
+        except CandidateArtifactError as error:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(error),
+            ) from error
+
+        return {
+            "prewarm": {
+                "generationId": prewarm.generation_id,
+                "candidateCount": prewarm.candidate_count,
+                "sizes": list(prewarm.sizes),
+                "status": prewarm.status,
+            }
+        }
 
     @app.get("/runs/{run_id}/exports/survivor-video")
     def get_run_survivor_video_export(run_id: str) -> dict[str, object]:

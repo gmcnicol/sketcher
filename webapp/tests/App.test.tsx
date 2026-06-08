@@ -281,7 +281,7 @@ describe('App MVP flow', () => {
       failedCount: 1,
       totalCandidateCount: 25,
     })
-    installFetch({
+    const fetchMock = installFetch({
       generation: firstGeneration,
       review: review({
         generationId: firstGeneration.id,
@@ -313,6 +313,7 @@ describe('App MVP flow', () => {
       'src',
       '/api/candidates/candidate-1/thumbnail.png?size=1024',
     )
+    await waitFor(() => expect(prewarmCallCount(fetchMock)).toBe(1))
   })
 
   it('submits j/k/u keyboard review actions only after image load and ignores editable targets', async () => {
@@ -703,6 +704,23 @@ function installFetch({
     }
 
     if (
+      url === `/api/runs/${run.id}/review/thumbnails/prewarm` &&
+      method === 'POST'
+    ) {
+      return jsonResponse(
+        {
+          prewarm: {
+            generationId: currentReview.generationId,
+            candidateCount: currentGeneration?.readyCount ?? 0,
+            sizes: [256, 1024],
+            status: 'queued',
+          },
+        },
+        202,
+      )
+    }
+
+    if (
       url === `/api/runs/${run.id}/exports/survivor-video` &&
       method === 'GET'
     ) {
@@ -776,6 +794,14 @@ function exportStartCallCount(fetchMock: ReturnType<typeof installFetch>) {
   return fetchMock.mock.calls.filter(
     ([url, init]) =>
       String(url).includes('/exports/survivor-video') &&
+      (init?.method ?? 'GET') === 'POST',
+  ).length
+}
+
+function prewarmCallCount(fetchMock: ReturnType<typeof installFetch>) {
+  return fetchMock.mock.calls.filter(
+    ([url, init]) =>
+      String(url).includes('/review/thumbnails/prewarm') &&
       (init?.method ?? 'GET') === 'POST',
   ).length
 }

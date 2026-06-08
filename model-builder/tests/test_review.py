@@ -1,5 +1,6 @@
 import hashlib
 import sqlite3
+import threading
 import uuid
 from pathlib import Path
 
@@ -339,6 +340,61 @@ def test_candidate_thumbnail_endpoint_serves_cached_png(
     assert render_calls[0]["render_parameters"]["shade_strokes"] == 0
     assert render_calls[0]["render_parameters"]["full_retrace_interval"] == 0
     assert render_calls[0]["render_parameters"]["flick_probability"] == 0.65
+
+
+def test_review_thumbnail_prewarm_endpoint_starts_background_job(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    client = TestClient(create_app(workspace))
+    run_id = upload_source(client)["run"]["id"]
+    generation = create_generation(client, run_id)
+    job_started = threading.Event()
+    job_calls: list[dict] = []
+
+    def fake_run_thumbnail_prewarm_job(
+        workspace_arg: Path,
+        run_id_arg: str,
+        generation_id: str,
+        candidate_ids: list[str],
+        sizes: tuple[int, ...],
+        key: tuple,
+    ) -> None:
+        job_calls.append(
+            {
+                "workspace": workspace_arg,
+                "run_id": run_id_arg,
+                "generation_id": generation_id,
+                "candidate_ids": candidate_ids,
+                "sizes": sizes,
+                "key": key,
+            }
+        )
+        job_started.set()
+
+    monkeypatch.setattr(
+        review_module,
+        "run_thumbnail_prewarm_job",
+        fake_run_thumbnail_prewarm_job,
+    )
+
+    response = client.post(f"/runs/{run_id}/review/thumbnails/prewarm")
+
+    assert response.status_code == 202
+    body = response.json()["prewarm"]
+    assert body["generationId"] == generation["id"]
+    assert body["candidateCount"] == 24
+    assert body["sizes"] == [256, 1024]
+    assert body["status"] == "queued"
+    assert job_started.wait(timeout=5)
+    assert len(job_calls) == 1
+    assert job_calls[0]["workspace"] == workspace
+    assert job_calls[0]["run_id"] == run_id
+    assert job_calls[0]["generation_id"] == generation["id"]
+    assert len(job_calls[0]["candidate_ids"]) == 24
+    assert job_calls[0]["candidate_ids"][0] == generation["candidates"][0]["id"]
+    assert job_calls[0]["sizes"] == (256, 1024)
 
 
 def test_candidate_artifact_endpoint_rejects_missing_artifacts(

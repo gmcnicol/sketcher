@@ -143,6 +143,7 @@ const generationPollIntervalMs = 1000
 const exportPollIntervalMs = 2000
 const thumbnailSize = 256
 const reviewImageSize = 1024
+const reviewPrefetchCount = 8
 
 function App() {
   const prefersReducedMotion = useReducedMotion()
@@ -180,6 +181,7 @@ function App() {
   const generationRequestBaselineRef = useRef(0)
   const reviewedTerminalGenerationRef = useRef<string | null>(null)
   const reviewActionInFlightRef = useRef(false)
+  const prewarmedGenerationRef = useRef<string | null>(null)
 
   const selectedFileLabel = useMemo(() => {
     if (!selectedFile) {
@@ -283,6 +285,18 @@ function App() {
     }
 
     setSurvivorExport((body as SurvivorVideoExportResponse).export)
+  }, [])
+
+  const startReviewThumbnailPrewarm = useCallback(async (runId: string) => {
+    const response = await fetch(
+      `${apiBaseUrl}/runs/${runId}/review/thumbnails/prewarm`,
+      { method: 'POST' },
+    )
+
+    if (!response.ok && response.status !== 409) {
+      const body = await response.json().catch(() => null)
+      throw new Error(body?.detail ?? 'Review thumbnail prewarm failed.')
+    }
   }, [])
 
   const startGenerationProgress = useCallback(
@@ -736,6 +750,46 @@ function App() {
     }, 0)
     return () => window.clearTimeout(timeout)
   }, [fetchSurvivorExport, result?.run.id])
+
+  useEffect(() => {
+    if (
+      !result ||
+      !generation ||
+      !isTerminalGenerationStatus(generation.status) ||
+      generation.readyCount === 0 ||
+      prewarmedGenerationRef.current === generation.id
+    ) {
+      return
+    }
+
+    prewarmedGenerationRef.current = generation.id
+    void startReviewThumbnailPrewarm(result.run.id).catch(() => undefined)
+  }, [generation, result, startReviewThumbnailPrewarm])
+
+  useEffect(() => {
+    if (!generation || !review?.currentCandidate) {
+      return
+    }
+
+    const readyCandidates = generation.candidates.filter(
+      (candidateItem) => candidateItem.validationStatus === 'ready',
+    )
+    const currentIndex = readyCandidates.findIndex(
+      (candidateItem) => candidateItem.id === review.currentCandidate?.id,
+    )
+    if (currentIndex < 0) {
+      return
+    }
+
+    const urls = readyCandidates.slice(
+      currentIndex,
+      currentIndex + reviewPrefetchCount,
+    ).flatMap((candidateItem) => [
+      candidateReviewImageUrl(candidateItem.id),
+      candidateThumbnailUrl(candidateItem.id),
+    ])
+    return prefetchImagesSequentially(urls)
+  }, [generation, review?.currentCandidate])
 
   useEffect(() => {
     const runId = result?.run.id
@@ -1843,6 +1897,38 @@ function candidateReviewImageUrl(candidateId: string) {
   return `${apiBaseUrl}/candidates/${encodeURIComponent(
     candidateId,
   )}/thumbnail.png?size=${reviewImageSize}`
+}
+
+function prefetchImage(url: string): Promise<void> {
+  if (typeof window === 'undefined' || typeof window.Image === 'undefined') {
+    return Promise.resolve()
+  }
+
+  return new Promise((resolve) => {
+    const image = new window.Image()
+    image.decoding = 'async'
+    image.onload = () => resolve()
+    image.onerror = () => resolve()
+    image.src = url
+  })
+}
+
+function prefetchImagesSequentially(urls: string[]) {
+  let cancelled = false
+
+  async function run() {
+    for (const url of urls) {
+      if (cancelled) {
+        return
+      }
+      await prefetchImage(url)
+    }
+  }
+
+  void run()
+  return () => {
+    cancelled = true
+  }
 }
 
 function apiDownloadUrl(path: string) {

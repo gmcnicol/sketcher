@@ -143,7 +143,9 @@ const generationPollIntervalMs = 1000
 const exportPollIntervalMs = 2000
 const thumbnailSize = 256
 const reviewImageSize = 1024
-const reviewPrefetchCount = 8
+const reviewPrefetchCount = 16
+const reviewPrefetchConcurrency = 4
+const thumbnailPrefetchConcurrency = 4
 
 function App() {
   const prefersReducedMotion = useReducedMotion()
@@ -792,31 +794,38 @@ function App() {
     )
     let cancelled = false
 
-    async function run() {
-      for (const candidateItem of candidatesToPrefetch) {
-        if (cancelled) {
-          return
-        }
-
-        const reviewImageLoaded = await prefetchImage(
-          candidateReviewImageUrl(candidateItem.id),
-        )
-        if (!cancelled && reviewImageLoaded) {
-          setPrefetchedReviewCandidateIds((currentIds) => {
-            if (currentIds.has(candidateItem.id)) {
-              return currentIds
-            }
-            const nextIds = new Set(currentIds)
-            nextIds.add(candidateItem.id)
-            return nextIds
-          })
-        }
-
-        if (cancelled) {
-          return
-        }
-        await prefetchImage(candidateThumbnailUrl(candidateItem.id))
+    function markReviewImageLoaded(candidateId: string) {
+      if (cancelled) {
+        return
       }
+      setPrefetchedReviewCandidateIds((currentIds) => {
+        if (currentIds.has(candidateId)) {
+          return currentIds
+        }
+        const nextIds = new Set(currentIds)
+        nextIds.add(candidateId)
+        return nextIds
+      })
+    }
+
+    async function run() {
+      await prefetchCandidateReviewImages(
+        candidatesToPrefetch,
+        () => cancelled,
+        markReviewImageLoaded,
+      )
+
+      if (cancelled) {
+        return
+      }
+
+      await prefetchImagesConcurrently(
+        candidatesToPrefetch.map((candidateItem) =>
+          candidateThumbnailUrl(candidateItem.id),
+        ),
+        thumbnailPrefetchConcurrency,
+        () => cancelled,
+      )
     }
 
     void run()
@@ -1945,6 +1954,59 @@ function prefetchImage(url: string): Promise<boolean> {
     image.onerror = () => resolve(false)
     image.src = url
   })
+}
+
+async function prefetchCandidateReviewImages(
+  candidates: CandidateSummary[],
+  isCancelled: () => boolean,
+  onLoaded: (candidateId: string) => void,
+) {
+  let nextIndex = 0
+
+  async function worker() {
+    while (!isCancelled()) {
+      const candidate = candidates[nextIndex]
+      nextIndex += 1
+      if (!candidate) {
+        return
+      }
+
+      const loaded = await prefetchImage(candidateReviewImageUrl(candidate.id))
+      if (!isCancelled() && loaded) {
+        onLoaded(candidate.id)
+      }
+    }
+  }
+
+  await Promise.all(
+    Array.from(
+      { length: Math.min(reviewPrefetchConcurrency, candidates.length) },
+      () => worker(),
+    ),
+  )
+}
+
+async function prefetchImagesConcurrently(
+  urls: string[],
+  concurrency: number,
+  isCancelled: () => boolean,
+) {
+  let nextIndex = 0
+
+  async function worker() {
+    while (!isCancelled()) {
+      const url = urls[nextIndex]
+      nextIndex += 1
+      if (!url) {
+        return
+      }
+      await prefetchImage(url)
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, urls.length) }, () => worker()),
+  )
 }
 
 function apiDownloadUrl(path: string) {

@@ -402,13 +402,16 @@ describe('App MVP flow', () => {
     expect(undoCallCount(fetchMock)).toBe(1)
   })
 
-  it('accepts review actions immediately when the next candidate image was prefetched', async () => {
+  it('accepts review actions immediately when upcoming candidate images were prefetched', async () => {
+    const prefetchedUrls: string[] = []
+
     class PrefetchImage {
       decoding = ''
       onload: (() => void) | null = null
       onerror: (() => void) | null = null
 
-      set src(_url: string) {
+      set src(url: string) {
+        prefetchedUrls.push(url)
         queueMicrotask(() => this.onload?.())
       }
     }
@@ -420,6 +423,8 @@ describe('App MVP flow', () => {
       candidate({ id: 'candidate-1', position: 1 }),
       candidate({ id: 'candidate-2', position: 2 }),
       candidate({ id: 'candidate-3', position: 3 }),
+      candidate({ id: 'candidate-4', position: 4 }),
+      candidate({ id: 'candidate-5', position: 5 }),
     ]
     const fetchMock = installFetch({
       generation: generation({ candidates }),
@@ -449,6 +454,11 @@ describe('App MVP flow', () => {
     })
     await waitFor(() =>
       expect(screen.getByRole('button', { name: /survive/i })).not.toBeDisabled(),
+    )
+    await waitFor(() =>
+      expect(prefetchedUrls).toContain(
+        '/api/candidates/candidate-4/thumbnail.png?size=1024',
+      ),
     )
 
     fireEvent.load(firstImage)
